@@ -160,6 +160,47 @@ class FSODB:
             sql += " AND excluded = 0"
         return self._conn.execute(sql + " ORDER BY event_date DESC").fetchall()
 
+    def get_pilot_names(self) -> list[str]:
+        """Every pilot who appears in a frame that is shown, sorted.
+
+        Backs the pilot type-ahead: FSO handles are easy to mistype, and
+        there are over four thousand of them.
+        """
+        rows = self._conn.execute(
+            "SELECT DISTINCT p.pilot FROM participants p "
+            "JOIN events e ON e.event_id = p.event_id "
+            "WHERE e.excluded = 0 AND p.pilot <> '' "
+            "ORDER BY p.pilot COLLATE NOCASE"
+        ).fetchall()
+        return [r["pilot"] for r in rows]
+
+    def get_frame_summaries(self):
+        """One row per displayed frame, with its pilot and sortie counts.
+
+        Counts come from `participants` and `log_entries` rather than
+        `side_stats`, so a frame whose posted totals are missing still
+        reports what its log actually contains.
+        """
+        return self._conn.execute("""
+            SELECT e.event_id,
+                   substr(e.event_date, 1, 10)          AS date,
+                   COALESCE(e.display_title, e.title)   AS name,
+                   e.campaign,
+                   e.frame_no,
+                   (SELECT COUNT(*) FROM participants p
+                     WHERE p.event_id = e.event_id)     AS pilots,
+                   (SELECT COUNT(*) FROM log_entries l
+                     WHERE l.event_id = e.event_id
+                       AND l.action = 'sortie_start')    AS sorties,
+                   (SELECT COUNT(*) FROM log_entries l
+                     WHERE l.event_id = e.event_id
+                       AND l.action = 'kill')            AS kills
+            FROM events e
+            WHERE e.excluded = 0
+              AND EXISTS (SELECT 1 FROM log_entries l WHERE l.event_id = e.event_id)
+            ORDER BY e.event_date DESC
+        """).fetchall()
+
     def apply_campaign_metadata(self) -> dict[str, int]:
         """Recompute display_title / campaign / frame_no / excluded for
         every event from fsostats.campaigns.
