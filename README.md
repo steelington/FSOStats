@@ -13,19 +13,43 @@ It's a companion to [AHStats](https://github.com/steelington/AHStats),
 which does the same for main-arena tour statistics, and shares its
 palette and grid components.
 
-## What it shows
+## Head-to-head
 
-- **Frames and campaigns** — 583 frames grouped into 201 campaigns,
-  switchable, with the site's inconsistent titles corrected.
-- **Pilot** — career totals, aircraft flown with a real per-type K/D,
-  every frame flown, and a kills-per-year trend.
-- **Head-to-head** — who you shot down, who shot you down, and the full
-  record against any named opponent. *The reason this exists:* an FSO
-  log names both parties on every shootdown, so the whole 18 years of
-  it is recoverable.
-- **Squad** — totals, roster, frame-by-frame history and a trend.
-- **Leaderboards** — all-time totals and podium finishes, for pilots
-  and squads.
+The reason this exists. An FSO log names both parties on every
+shootdown, so a pilot's record against any individual opponent is
+recoverable — across all eighteen years.
+
+![Head-to-head](docs/screenshots/04-head-to-head.png)
+
+Pick an opponent and every engagement between the two is listed: which
+way it went, in which frame, and what was lost.
+
+## Everything else
+
+**Pilot** — career totals, aircraft flown with a real per-type K/D,
+every frame flown, and a kills-per-year trend.
+
+![Pilot](docs/screenshots/03-pilot.png)
+
+**Squad** — totals, roster, frame-by-frame history and a trend of its
+own.
+
+![Squad](docs/screenshots/06-squad.png)
+
+**Frames and campaigns** — 583 frames grouped into 201 campaigns,
+switchable, with the site's inconsistent titles corrected.
+
+![Frames](docs/screenshots/01-frames.png)
+
+**Frame detail** — both teams, the side each actually fought for, and
+every pilot's result.
+
+![Frame detail](docs/screenshots/05-frame-detail.png)
+
+**Leaderboards** — all-time totals beside podium finishes, for pilots
+and squads.
+
+![Leaderboards](docs/screenshots/07-leaderboards.png)
 
 Every grid sorts, filters and exports to CSV. Hovering a column heading
 explains what it counts, which matters more here than in most apps —
