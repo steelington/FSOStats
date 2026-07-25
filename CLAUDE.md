@@ -13,36 +13,91 @@ project's UI components.
 the data-layer bugs already fixed, and the open TODOs. Don't re-derive
 them from the code.
 
-## State (July 2026)
+## State (25 July 2026)
 
-Data layer works; the GUI hasn't been started. 586 of 659 events have
-logs, 589,621 log entries, 4,331 pilots, 2008-2026. Not yet a git repo.
+Data layer and GUI both work. 660 events, 587 with logs, 590,741 log
+entries, 4,318 pilots, 2009-2026. Of those, 583 frames are shown -
+4 are excluded as duplicates or test events - grouped into 201
+campaigns. Run with `python -m fsostats.gui`; tests with `pytest tests`
+(112 of them).
+
+Git remote is Gitea at http://192.168.188.140:3000/steely/FSOStats.
+AHSTATS is there too, and keeps its GitHub remote as `github` for when
+it ships.
+
+**Not done:** packaging (no .spec; `paths.get_database_path()` has the
+seed-into-%LOCALAPPDATA% logic but has never run frozen), and identity
+groups for pilots who rename - AHSTATS solved that one and it's worth
+porting.
 
 ## Layout
 
-    fsostats/client.py   rate-limited HTTP client for ahevents.net
-    fsostats/parser.py   BeautifulSoup parsing of the event-log pages
-    fsostats/db.py       SQLite persistence (FSODB)
-    fsostats/sides.py    infers Allied/Axis from aircraft flown
-    scrape_fso.py        resumable scrape; --workers N, --interval S
+    fsostats/client.py      rate-limited HTTP client for ahevents.net
+    fsostats/parser.py      BeautifulSoup parsing of the event-log pages
+    fsostats/db.py          SQLite persistence (FSODB)
+    fsostats/sides.py       infers Allied/Axis from aircraft flown
+    fsostats/campaigns.py   frame numbers, curated titles, clustering
+    fsostats/pilot.py       career, aircraft, frames, yearly trend
+    fsostats/headtohead.py  who killed whom
+    fsostats/squads.py      squad totals and name folding
+    fsostats/leaderboard.py all-time boards and podium finishes
+    fsostats/update.py      the in-app Update job
+    fsostats/gui.py         the app; grid/chart/theme/tooltip beside it
+    scrape_fso.py           resumable scrape; --workers N, --interval S
+    tests/                  pytest; toy fixtures plus real-db invariants
+
+## Recomputing derived data
+
+Three tables/columns are derived and must be refreshed after any scrape:
+
+    db.apply_campaign_metadata()   display_title, campaign, frame_no,
+                                   excluded, one_sided
+    db.apply_side_roles()          the side_roles table
+
+Both are cheap and idempotent. `scrape_fso.py` and the Update button
+already call them; anything else that writes events must too.
 
 ## Things that will bite you
 
 **One `events` row is one frame, not one event.** An FSO event is
 normally three frames on consecutive Fridays. Users think in both units.
-Grouping frames into campaigns is unsolved - only 88% of titles have a
-parseable frame number. See PLAN.md.
+`campaigns.cluster()` groups them - 583 frames into 201 campaigns - and
+`events.campaign` holds the result.
+
+**A campaign's name is not its identity.** Names recur across years:
+Battle of Britain ran four times, Pantelleria three. Grouping by name
+merged three Pantelleria campaigns into one nine-frame campaign
+numbered 1,1,1,2,2,2,3,3,3. Repeated names carry their year.
 
 **Only `sortie_start` says what a pilot flew.** A `kill` log entry names
 the *victim's* aircraft. Counting planes across all actions makes both
-sides look identical, which reads like a parser bug and isn't.
+sides look identical, which reads like a parser bug and isn't. To get
+the pilot's own aircraft, attribute each entry to the most recent
+`sortie_start` at or before its `seq` - see `pilot.py`.
+
+**A shootdown is logged twice**, as the killer's `kill` row and the
+victim's `death` row. Counting both double-counts 46,586 of them;
+counting only kills loses the 4,410 deaths no kill row covers.
+`headtohead.py` takes every kill plus only the uncovered deaths.
+
+**Handles and squad names fold.** 165 handles differ from another only
+by case, so every pilot comparison is `COLLATE NOCASE` - and needs a
+NOCASE index, since a plain one can't serve it. Squad names also vary by
+spacing, decoration and punctuation, so `squads.squad_key()` keeps only
+letters and digits. Never match squads by substring: II./JG11 is inside
+III./JG11 Black Hearts and they are different units.
 
 **Side names are per-event and unreliable.** As well as Allies/Axis there
 are themed names (USAAF/Luftwaffe, Blue Thunder); some frames label both
-teams identically, and a few have the labels swapped outright. Use
-`sides.py`, which infers the role from aircraft, rather than trusting the
-label. Never re-introduce an allowlist of side names - that bug cost 184
-events.
+teams identically, and a few have the labels swapped outright. Use the
+`side_roles` table, inferred from aircraft by `sides.py`, rather than
+trusting the label. Never re-introduce an allowlist of side names - that
+bug cost 184 events.
+
+**47 frames hold only one team's log**, flagged as `events.one_sided`.
+The other side was never posted and never turned up later. Pilots on the
+missing side get no credit for a frame they flew, and it explains 3,858
+of the 3,862 kill rows naming a victim who isn't a participant.
 
 **FSO substitutes aircraft across sides.** Finland flies P-40Cs and
 Brewster B-239s; Italian C.205s appear on the Allied side after 1943. No

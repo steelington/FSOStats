@@ -104,11 +104,14 @@ performance over time.
 
 ## Ported from AHSTATS (E:\AHSTATS)
 
-`grid.py` - sortable/filterable grids with totals footers.
-`chart.py` - Canvas trend charts, no extra dependencies.
-`theme.py` - palette and ttk styling.
-Identity groups - pilots rename over 18 years; same problem AHSTATS
-already solved, worth porting.
+`grid.py` - sortable/filterable grids, since extended here with a
+per-grid quick filter, row count and CSV export.
+`chart.py` - Canvas trend charts, no extra dependencies. Its x-axis
+label was hard-coded to "Tour"; the caller names it now.
+`theme.py` - palette and ttk styling, unchanged so the two apps match.
+`paths.py` - resource and app-data paths for a frozen build.
+Identity groups - **not yet ported.** Pilots rename over 18 years; same
+problem AHSTATS already solved.
 
 ## Caveats to surface in the UI
 
@@ -118,10 +121,33 @@ already solved, worth porting.
   frames are mislabelled at source.
 - A pilot's totals only cover frames whose logs were published.
 
-## Suggested build order
+## Build order - all done (25 Jul 2026)
 
-1. Campaign grouping + validation (everything else depends on the unit)
-2. Pilot view: career totals + frame list
-3. Head-to-head
-4. Aircraft / outcomes / side role
-5. Squad view, leaderboards, trend charts
+1. ~~Campaign grouping + validation~~ - 201 campaigns, 187 complete
+2. ~~Pilot view: career totals + frame list~~
+3. ~~Head-to-head~~
+4. ~~Aircraft / outcomes / side role~~ - roles in the `side_roles` table
+5. ~~Squad view, leaderboards, trend charts~~
+
+Also built since: frame detail, click-through between every view,
+per-grid quick filter and CSV export, hover tooltips carrying the data
+caveats, the in-app Update button, and 112 tests.
+
+## What's left
+
+**Packaging.** No `.spec` yet. `paths.get_database_path()` has the
+seed-into-`%LOCALAPPDATA%` logic but has never run frozen, and that is
+exactly where the onefile trap bites - see FINDINGS.md. `VACUUM` needs
+to be a build step; it reclaims 12 MB.
+
+**Identity groups.** Pilots rename across 18 years and their careers
+split across handles. Case is folded already; renames are not. AHSTATS
+solved this and it's worth porting.
+
+**Smaller:** a participation-over-time chart would put the decline in
+the app - median pilots per frame went 471 in 2009 to 66 in 2025, though
+2026 is flat so far, and the schedule never missed a year.
+
+**Open data questions:** 4 kill rows still name a victim who isn't a
+participant of a two-sided frame; `sides.py` has an untested idea about
+weighting affinity non-linearly.
