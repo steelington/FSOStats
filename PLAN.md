@@ -9,17 +9,41 @@ One `events` row = one **frame**. An FSO **event/campaign** is normally
 three frames on consecutive Fridays. Users think in both units, so most
 views need a frame/campaign toggle.
 
-### Campaign grouping is the one hard problem
+### Campaign grouping - frame numbers are solved, clustering isn't
 
-Only 516 of 586 frames (88%) have a parseable frame number. The rest use
-`Fr1` / `Fr 3`, Roman numerals (`Frame I`), or nothing at all - "North
-Sea Raiders" appears twice with no number.
+**Frame numbers: done** (`fsostats/campaigns.py`). 537 of 587 frames
+(91.5%) state their number once digits, word-numbers (`Frame One`) and
+Roman numerals (`Frame I`) are all handled - the earlier 88% figure
+counted digits only. The remaining 50 are corrected by hand in
+`OVERRIDES`, so every frame with logs now has a number or is a declared
+one-off. `apply_campaign_metadata()` writes the results to
+`events.display_title` / `campaign` / `frame_no`.
 
-Proposed approach: normalise the title (strip frame markers, punctuation,
-case) to get a campaign key, then cluster by date, since frames run about
-a week apart. Date proximity resolves the unnumbered repeats that title
-matching alone can't. Needs validating against the 88% that *are*
-numbered - they're free ground truth.
+Reading each unnumbered frame's neighbours in date order is what settled
+them: 34 are a frame 1 that omitted the number while its own frames 2-3
+are numbered. **Do not assume unnumbered means frame 1** - 3268 (Case
+Blue), 3604 (Kursk) and 3938/3941 (Tunisia) sit in the *middle* of a
+numbered run.
+
+Also found: 3913 types the year as 1954 instead of 1945, so it won't
+title-match its own frames; and 2168/2169 plus 2756/2757 are duplicate
+submissions - same date, same title, identical log counts - which would
+double-count every pilot in those frames. Both duplicates are in
+`EXCLUDED`, with `Training` and a 2010 test event.
+
+**Still open: clustering the other 537 into campaigns.** Normalise the
+title with `campaign_key()`, then walk frames in date order and attach
+one to an open campaign when the key is similar enough *and* the gap is
+under ~15 days. Two things it must handle: campaigns that recur years
+apart (Battle of Britain 2012/2014/2016, Bougainville 2021/2025) need
+the date gap as a hard cut, and titles whose word order reverses
+mid-campaign need token-set rather than sequence similarity.
+
+Validate against the numbered frames as free ground truth: group them
+ignoring their numbers, then check the numbers that come back are
+distinct and consecutive within each campaign. Duplicates mean a merge,
+gaps mean a split. Note that "starts at frame 2" is *not* an error - the
+73 missing logs mean a campaign can genuinely be missing its frame 1.
 
 ## Core views
 

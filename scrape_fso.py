@@ -32,6 +32,21 @@ from fsostats.parser import parse_fso_event, parse_fso_event_list
 DEFAULT_WORKERS = 3
 DEFAULT_INTERVAL = 3.0
 
+# Everything up to and including this date is already scraped, hand
+# checked and titled (fsostats/campaigns.py), and ships in the database.
+# Ignoring it entirely does two things:
+#
+#   * stops the update re-requesting the 73 events ahevents.net cannot
+#     render - they are all 2008-2013 and will never return, so every
+#     run was spending ~4 minutes to fail 73 times, and
+#   * keeps upsert_event_listings away from historical rows. It does
+#     `title=excluded.title` for every listing it is given, so any run
+#     covering old events would overwrite their curated titles.
+#
+# 24 Jul 2026 is August Storm Frame 3, the last frame of a complete
+# campaign. Move this forward only when the newest campaign is complete.
+SCRAPE_SINCE = "2026-07-24"
+
 
 def _parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -39,6 +54,12 @@ def _parse_args():
                         help=f"parallel fetchers (default {DEFAULT_WORKERS})")
     parser.add_argument("--interval", type=float, default=DEFAULT_INTERVAL,
                         help=f"min seconds between requests per worker (default {DEFAULT_INTERVAL})")
+    parser.add_argument("--since", default=SCRAPE_SINCE, metavar="YYYY-MM-DD",
+                        help=f"ignore events on or before this date (default {SCRAPE_SINCE})")
+    parser.add_argument("--all", action="store_true",
+                        help="ignore --since and consider every event on the site. "
+                             "Rebuilds from scratch; overwrites curated titles, so "
+                             "re-run with --retitle afterwards.")
     return parser.parse_args()
 
 
@@ -59,6 +80,15 @@ def main():
     listing_client = FSOClient(min_interval=args.interval)
     listings = parse_fso_event_list(listing_client.fetch_landing_page())
     print(f"Found {len(listings)} FSO events.", flush=True)
+
+    if not args.all:
+        # event_date is "YYYY-MM-DD HH:MM:SS", so a string compare against
+        # a bare date is a plain date comparison.
+        recent = [l for l in listings if (l.event_date or "")[:10] > args.since]
+        print(f"{len(listings) - len(recent)} on or before {args.since} ignored "
+              f"(already scraped and titled); {len(recent)} in scope.", flush=True)
+        listings = recent
+
     db.upsert_event_listings(listings)
 
     fetched = db.get_fetched_event_ids()
@@ -120,6 +150,13 @@ def main():
                       f"{len(event.participants)} pilots. ETA {eta_min:.1f} min", flush=True)
 
     print(f"\nDone. {ok} fetched, {failed} failed, {len(fetched)} already cached.", flush=True)
+
+    # New frames arrive untitled; this names them, and picks up any
+    # correction added to campaigns.py since the last run.
+    counts = db.apply_campaign_metadata()
+    print(f"Titles applied: {counts['named']} named from campaigns.py, "
+          f"{counts['ungrouped']} from their own title, "
+          f"{counts['excluded']} excluded.", flush=True)
     db.close()
 
 

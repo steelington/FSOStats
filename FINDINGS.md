@@ -106,8 +106,10 @@ ones.
   recover 73 events of FSO history.
 
   They cluster in 2008-2013, consistent with old cache files being
-  cleaned up. TODO: record them as known-bad so the update run stops
-  re-requesting all 73 every time.
+  cleaned up. **Done (25 Jul 2026):** `scrape_fso.py` now ignores
+  everything on or before `SCRAPE_SINCE` (2026-07-24), so the update run
+  no longer re-requests all 73. They are also hidden from the frame list
+  by `FSODB.get_frames()`.
 - **Frames with genuinely swapped labels** (3682, 3734 confirmed) - the
   classifier finds them; decide whether to correct or just flag.
 - `scrape.pid` was a stale lock from an interrupted run; nothing reads

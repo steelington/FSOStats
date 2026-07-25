@@ -16,7 +16,13 @@ CREATE TABLE IF NOT EXISTS events (
     event_date TEXT,
     title TEXT,
     frame_title TEXT,
-    fetched_at TEXT NOT NULL
+    fetched_at TEXT NOT NULL,
+    -- Curated, derived from fsostats.campaigns. `title` stays exactly as
+    -- ahevents.net served it; everything user-facing reads these instead.
+    display_title TEXT,
+    campaign TEXT,
+    frame_no INTEGER,
+    excluded INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS participants (
@@ -87,7 +93,24 @@ class FSODB:
         self._conn = sqlite3.connect(str(self.path))
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(SCHEMA)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Add columns to a database created before they existed.
+
+        CREATE TABLE IF NOT EXISTS silently does nothing on an existing
+        table, so a shipped database would otherwise never gain them.
+        """
+        have = {r["name"] for r in self._conn.execute("PRAGMA table_info(events)")}
+        for column, ddl in (
+            ("display_title", "TEXT"),
+            ("campaign", "TEXT"),
+            ("frame_no", "INTEGER"),
+            ("excluded", "INTEGER NOT NULL DEFAULT 0"),
+        ):
+            if column not in have:
+                self._conn.execute(f"ALTER TABLE events ADD COLUMN {column} {ddl}")
 
     def close(self):
         self._conn.close()
@@ -118,6 +141,61 @@ class FSODB:
 
     def get_events(self):
         return self._conn.execute("SELECT * FROM events ORDER BY event_date DESC").fetchall()
+
+    def get_frames(self, include_excluded: bool = False):
+        """Frames for display: those with logs, sensibly titled.
+
+        Excludes the 73 events ahevents.net can't render (they have no
+        logs and never will - see FINDINGS.md) along with the duplicate
+        submissions and test events listed in campaigns.EXCLUDED.
+        """
+        sql = """
+            SELECT event_id, event_date,
+                   COALESCE(display_title, title) AS name,
+                   campaign, frame_no, title AS source_title
+            FROM events
+            WHERE EXISTS (SELECT 1 FROM log_entries l WHERE l.event_id = events.event_id)
+        """
+        if not include_excluded:
+            sql += " AND excluded = 0"
+        return self._conn.execute(sql + " ORDER BY event_date DESC").fetchall()
+
+    def apply_campaign_metadata(self) -> dict[str, int]:
+        """Recompute display_title / campaign / frame_no / excluded for
+        every event from fsostats.campaigns.
+
+        Safe and cheap to re-run; it's the step that picks up a
+        correction added to campaigns.py, so run it after any scrape.
+        """
+        from fsostats import campaigns
+
+        rows = self._conn.execute("SELECT event_id, title FROM events").fetchall()
+        counts = {"named": 0, "excluded": 0, "ungrouped": 0}
+        updates = []
+        for row in rows:
+            eid, title = row["event_id"], row["title"] or ""
+            campaign, frame_no, is_excluded = campaigns.resolve(eid, title)
+            if is_excluded:
+                counts["excluded"] += 1
+            elif campaign is not None:
+                counts["named"] += 1
+            else:
+                counts["ungrouped"] += 1
+            if campaign and frame_no:
+                display = f"{campaign} - Frame {frame_no}"
+            elif campaign:
+                display = campaign
+            else:
+                display = title
+            updates.append((display, campaign, frame_no, int(is_excluded), eid))
+
+        with self._conn:
+            self._conn.executemany(
+                "UPDATE events SET display_title=?, campaign=?, frame_no=?, excluded=? "
+                "WHERE event_id=?",
+                updates,
+            )
+        return counts
 
     # -- one event's full log ------------------------------------------
 
