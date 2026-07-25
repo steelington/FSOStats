@@ -166,14 +166,18 @@ OVERRIDES: dict[int, tuple[str, int | None, str]] = {
     4145: ("Thunder over the Solomons", 3, "titled 'Bougainville 43'"),
 
     # --- genuine one-offs, not part of any campaign ---
-    2168: ("North Sea Raiders", None,
-           "standalone frame between two campaigns; resubmitted as 2169"),
+    2169: ("North Sea Raiders", None,
+           "standalone frame between two campaigns; 2168 is the same "
+           "submission with both teams mislabelled 'Allies'"),
     2596: ("Combat Challenge III", None, "standalone event"),
 }
 
 # Events to keep out of the frame list and out of every total.
 EXCLUDED: dict[int, str] = {
-    2169: "duplicate submission of 2168 - same date, same 1223 log entries",
+    2168: "duplicate submission of 2169, and the worse copy of the two: its "
+          "log entries are byte-identical to 2169's, but it labels both "
+          "teams 'Allies' (the parser suffixes the repeat) where 2169 has "
+          "proper Allies/Axis labels",
     2756: "duplicate submission of 2757 - same date, same 1234 log entries; "
           "2757 is the copy that carries 'Frame 1'",
     3049: "'Training' - a 14-entry test event, not an FSO frame",
@@ -181,14 +185,12 @@ EXCLUDED: dict[int, str] = {
           "between Operation Marita frames 1 and 2",
 }
 
-# Judgement calls worth revisiting against the event write-ups on
-# ahevents.net, recorded rather than buried:
-#
-#   2168/2169 - "North Sea Raiders", both on 30 Mar 2012 with identical
-#   log counts. Treated as one standalone frame plus a duplicate rather
-#   than two frames of a campaign: the Fridays either side belong to
-#   other campaigns that are already complete.
-UNCERTAIN = (2168, 2169)
+# Nothing is currently unresolved. 2168/2169 was the last open case and
+# was settled by comparing the logs directly: all 1223 entries match
+# byte for byte across the two, same pilots killing the same victims in
+# the same aircraft, so it is one frame submitted twice and not two
+# frames sharing a title.
+UNCERTAIN: tuple[int, ...] = ()
 
 
 def resolve(event_id: int, title: str) -> tuple[str | None, int | None, bool]:

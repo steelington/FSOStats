@@ -31,6 +31,14 @@ squads and totals - two real teams. The parser now suffixes the repeat
 (`Allies (2)`) rather than merging opposing teams or dropping one. Same
 treatment for a squad repeated within one side.
 
+**Update (25 Jul 2026):** 2168 turned out to be a duplicate. `plissken`
+submitted the same frame twice at the same timestamp, as 2168 and 2169;
+all 1223 log entries match byte for byte, but 2169 carries proper
+Allies/Axis labels. 2168 is now in `campaigns.EXCLUDED` and 2169 is the
+copy kept. The parser behaviour still matters - it is what made the
+mislabelled copy parse at all, which is how the pair was comparable in
+the first place.
+
 ### 4. One bad event killed the whole run
 
 `db.save_event` was called outside any try/except, so a single
