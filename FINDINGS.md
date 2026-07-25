@@ -174,6 +174,33 @@ TODO: 3,862 kill rows name a victim who isn't a participant of that
 event. Worth understanding before career totals are trusted - it may be
 case drift, or a side roster the page didn't list.
 
+## 47 frames hold only one side's log (25 Jul 2026)
+
+8% of frames (47 of 587) have a single side in `log_entries` - the
+submitter posted one team and not the other.
+
+**They were never reposted.** Checked every one against every two-sided
+frame within 120 days: not one has a same-date counterpart. The 27
+near-matches are all *other frames of the same campaign*, 7 or 14 days
+later. The missing side's log is simply gone.
+
+The one exception is 3540/3541 - "Frame 3.1" and "Frame 3.2", posted a
+second apart by the same submitter. That is one frame split across two
+event rows, one side each, not two frames.
+
+**This explains the orphan victims.** Of the 3,862 kill rows naming a
+victim who isn't a participant of that event, **3,858 (99.9%) are in
+one-sided frames** - the winning side's log names victims from a team
+whose roster was never posted. Only 4 remain unexplained, which closes
+that TODO.
+
+Flagged as `events.one_sided` rather than excluded: the side that *was*
+posted is real data, and dropping it would erase genuine frames from
+those pilots' careers. The frame list shows "one"/"both" per frame and
+the campaign view counts half-logged frames. What it does mean is that
+any side-versus-side comparison in those frames is half-blind, and
+pilots on the missing side get no credit for a frame they flew.
+
 ## Squads and leaderboards (25 Jul 2026)
 
 `squad_stats` is posted per event/side/squad by the site and **agrees

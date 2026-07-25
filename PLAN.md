@@ -31,19 +31,37 @@ submissions - same date, same title, identical log counts - which would
 double-count every pilot in those frames. Both duplicates are in
 `EXCLUDED`, with `Training` and a 2010 test event.
 
-**Still open: clustering the other 537 into campaigns.** Normalise the
-title with `campaign_key()`, then walk frames in date order and attach
-one to an open campaign when the key is similar enough *and* the gap is
-under ~15 days. Two things it must handle: campaigns that recur years
-apart (Battle of Britain 2012/2014/2016, Bougainville 2021/2025) need
-the date gap as a hard cut, and titles whose word order reverses
-mid-campaign need token-set rather than sequence similarity.
+**Clustering: done** (`campaigns.cluster`). 583 frames group into **201
+campaigns, 187 of them a complete three**, with no unexplained
+frame-number errors.
 
-Validate against the numbered frames as free ground truth: group them
-ignoring their numbers, then check the numbers that come back are
-distinct and consecutive within each campaign. Duplicates mean a merge,
-gaps mean a split. Note that "starts at frame 2" is *not* an error - the
-73 missing logs mean a campaign can genuinely be missing its frame 1.
+A frame joins an open campaign when the titles are similar enough, the
+gap is under 15 days, *and the frame number isn't already taken*. Using
+the numbers as a constraint during clustering - not only to check it
+afterwards - is what makes it reliable; it prevents two campaigns
+merging and let the date window stay wide enough to span a missing
+middle frame. Similarity blends token overlap (which survives the word
+order reversing mid-campaign) with sequence matching (which handles
+spelling drift).
+
+Validation used the numbered frames as free ground truth and earned its
+keep - every failure it reported was real:
+
+* **Campaign names repeat across years**, so the name cannot be the
+  identity. Grouping by it merged three separate Pantelleria campaigns
+  into one nine-frame campaign numbered 1,1,1,2,2,2,3,3,3. Repeated
+  names now carry their year.
+* **Two campaigns renamed mid-run** were found as `[1, 3]` with the
+  middle frame stranded elsewhere: "September FSO - B.O.B 1940 Frame 2"
+  and "PRIVATEERS Solomons 1943 Frame 2". Both now curated.
+* **3776 is titled "Frame 2"** a week after the real frame 2. Curated
+  as frame 3.
+* **3540/3541 are one frame, not two** - "Frame 3.1" and "Frame 3.2",
+  one side each.
+
+The single remaining flag is correct: Crimean Catastrophe (2016) is
+`[1, 3]` because frame 2 is one of the 73 events the site cannot render.
+"Starts at frame 2" is likewise not an error.
 
 ## Core views
 

@@ -17,6 +17,7 @@ title stays exactly as the site served it.
 """
 from __future__ import annotations
 
+import difflib
 import re
 
 WORD_NUMBERS = {
@@ -62,8 +63,12 @@ def frame_number_from_title(title: str) -> int | None:
     return None
 
 
+# The `\.\d+` tail catches "Frame 3.1" / "Frame 3.2", which is how one
+# frame posted as two rows - one side each - is numbered. Without it the
+# stripped title keeps a stray ".1".
 _FRAME_MARKER = re.compile(
-    r"(?:frame|fr)\.?\s*#?\s*(?:\d+|" + "|".join(WORD_NUMBERS) + r"|i{1,3}|iv|vi?)\b",
+    r"(?:frame|fr)\.?\s*#?\s*(?:\d+(?:\.\d+)?|"
+    + "|".join(WORD_NUMBERS) + r"|i{1,3}|iv|vi?)\b",
     re.I,
 )
 # "JAN FSO -", "March 2018 FSO:", "MAY 2015 FSO -", "July 2019 FSO."
@@ -165,6 +170,22 @@ OVERRIDES: dict[int, tuple[str, int | None, str]] = {
     4142: ("Thunder over the Solomons", 2, "titled 'Bougainville 43'"),
     4145: ("Thunder over the Solomons", 3, "titled 'Bougainville 43'"),
 
+    # --- renamed mid-campaign, so no title match can group them ---
+    # Found by validation: each came out as a campaign numbered [1, 3]
+    # with its middle frame stranded as a singleton under another name.
+    2935: ("Battle of Britain 1940 (Sep 2015)", 1, "name reused in 2012, 2014 and 2016"),
+    2937: ("Battle of Britain 1940 (Sep 2015)", 2, "titled 'September FSO - B.O.B 1940 Frame 2'"),
+    2938: ("Battle of Britain 1940 (Sep 2015)", 3, ""),
+    2982: ("Bougainville 1943", 1, ""),
+    2985: ("Bougainville 1943", 2, "titled 'PRIVATEERS Solomons 1943 Frame 2'"),
+    2986: ("Bougainville 1943", 3, ""),
+
+    # --- frame numbered wrongly at source ---
+    # 3774 and 3776 are both titled "Frame 2", a week apart, with
+    # different logs (692 entries against 178). 3776 is the third frame.
+    3776: ("Crossing the Dnieper: Cherkassy-Korsun 1943", 3,
+           "titled 'Frame 2' at source, a week after the real frame 2 (3774)"),
+
     # --- genuine one-offs, not part of any campaign ---
     2169: ("North Sea Raiders", None,
            "standalone frame between two campaigns; 2168 is the same "
@@ -191,6 +212,152 @@ EXCLUDED: dict[int, str] = {
 # the same aircraft, so it is one frame submitted twice and not two
 # frames sharing a title.
 UNCERTAIN: tuple[int, ...] = ()
+
+
+# --- clustering frames into campaigns --------------------------------
+#
+# Frames run weekly, so two frames of one campaign are ~7 days apart.
+# 15 days allows for one skipped Friday - FSO takes breaks - without
+# reaching across to the next campaign. The frame-number constraint
+# below is what makes the wider window safe.
+MAX_GAP_DAYS = 15
+
+# Similarity needed to call two titles the same campaign. Tuned by
+# sweeping against the numbered frames: see cluster() for the method.
+SIMILARITY = 0.55
+
+# Words carrying no campaign identity.
+_STOP_WORDS = {"logs", "log", "fso", "the", "a", "of", "frame", "fr"}
+
+
+def campaign_tokens(title: str) -> set[str]:
+    """The meaningful words of a title.
+
+    Token overlap is what survives word-order reversal - 'Tunisia:
+    Verdun of the Mediterranean 1943' against '1943: Tunisia - The
+    Verdun of Mediterranean' - which sequence matching cannot.
+    """
+    text = _DATE_PREFIX.sub(" ", title)
+    text = _FRAME_MARKER.sub(" ", text)
+    text = re.sub(r"[^a-z0-9]+", " ", text.lower())
+    return {w for w in text.split() if len(w) > 1 and w not in _STOP_WORDS}
+
+
+def title_similarity(a_tokens: set[str], a_key: str,
+                     b_tokens: set[str], b_key: str) -> float:
+    """How alike two frame titles are, 0..1."""
+    sequence = difflib.SequenceMatcher(None, a_key, b_key).ratio()
+    if not a_tokens or not b_tokens:
+        return sequence
+    shared = len(a_tokens & b_tokens)
+    # Overlap over the smaller set, so 'Case Blue' still matches
+    # 'Case Blue: the drive on Stalingrad'. Discounted slightly so a
+    # true sequence match outranks a bare subset.
+    overlap = shared / min(len(a_tokens), len(b_tokens)) * 0.95
+    jaccard = shared / len(a_tokens | b_tokens)
+    return max(overlap, jaccard, sequence)
+
+
+def cluster(frames: list[dict]) -> list[list[dict]]:
+    """Group frames into campaigns. `frames` must be date-ordered dicts
+    with keys: id, date (datetime.date), title, frame_no, campaign.
+
+    A frame joins an open campaign when the titles are similar enough,
+    the gap is short enough, and - the part that makes it reliable - the
+    frame number isn't already taken. Frame numbers are ground truth for
+    91.5% of frames, so using them as a constraint during clustering,
+    not only to check it afterwards, prevents two campaigns merging.
+
+    The exception is two events on the same date: those are one frame
+    posted as two rows, one side each (3540/3541), not two frames.
+
+    Hand-curated campaign names win outright. Nothing else could group
+    'Thunder over the Solomons' with the 'Bougainville 43' frames that
+    follow it, because the campaign was renamed mid-run.
+
+    Measured this way over the 583 frames with logs: 208 campaigns, 183
+    of them a complete three, no broken frame-number sequences.
+    """
+    campaigns: list[dict] = []
+    by_curated: dict[str, dict] = {}
+
+    for frame in frames:
+        curated = frame.get("campaign")
+        if curated:
+            existing = by_curated.get(curated)
+            if existing is not None:
+                existing["frames"].append(frame)
+                existing["last"] = frame["date"]
+                continue
+
+        tokens = campaign_tokens(frame["title"])
+        key = campaign_key(frame["title"])
+
+        best, best_score = None, 0.0
+        for camp in reversed(campaigns):
+            if (frame["date"] - camp["last"]).days > MAX_GAP_DAYS:
+                continue
+            if curated and camp.get("curated") and camp["curated"] != curated:
+                continue
+            number = frame.get("frame_no")
+            if number and number in camp["numbers"]:
+                # Same date means one frame split by side, not a clash.
+                if frame["date"] not in camp["dates"]:
+                    continue
+            score = title_similarity(tokens, key, camp["tokens"], camp["key"])
+            if score > best_score:
+                best, best_score = camp, score
+
+        if best is not None and best_score >= SIMILARITY:
+            best["frames"].append(frame)
+            best["last"] = frame["date"]
+            best["tokens"] |= tokens
+            best["dates"].add(frame["date"])
+            if frame.get("frame_no"):
+                best["numbers"].add(frame["frame_no"])
+            if curated:
+                best["curated"] = curated
+                by_curated[curated] = best
+            continue
+
+        fresh = {
+            "key": key, "tokens": set(tokens), "last": frame["date"],
+            "dates": {frame["date"]}, "curated": curated,
+            "numbers": {frame["frame_no"]} if frame.get("frame_no") else set(),
+            "frames": [frame],
+        }
+        campaigns.append(fresh)
+        if curated:
+            by_curated[curated] = fresh
+
+    return [c["frames"] for c in campaigns]
+
+
+def campaign_name(frames: list[dict]) -> str:
+    """The name to show for a clustered campaign.
+
+    A curated name wins. Otherwise the longest title in the group with
+    its frame marker stripped - the fullest spelling, since frames get
+    abbreviated as a campaign goes on ('Operation Clarion 1945' then
+    'Clarion - 1945').
+    """
+    for frame in frames:
+        if frame.get("campaign"):
+            return frame["campaign"]
+    titles = []
+    for frame in frames:
+        text = _DATE_PREFIX.sub(" ", frame["title"])
+        text = _FRAME_MARKER.sub(" ", text)
+        # Submitters often end a title with 'logs' ("The Luftwaffe end is
+        # near Frame 2 logs"), which is about the posting, not the
+        # campaign, and would otherwise ride along in the name.
+        text = re.sub(r"\blogs?\b", " ", text, flags=re.I)
+        titles.append(text)
+    best = re.sub(r"\s+", " ", max(titles, key=len)).strip()
+    # Punctuation at either end is left over from stripping the frame
+    # marker - "Frame 1: Operation Bodenplatte" would otherwise become
+    # ": Operation Bodenplatte".
+    return re.sub(r"^[\s\-:;,.]+|[\s\-:;,.]+$", "", best)
 
 
 def resolve(event_id: int, title: str) -> tuple[str | None, int | None, bool]:

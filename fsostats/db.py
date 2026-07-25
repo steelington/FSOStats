@@ -119,6 +119,7 @@ class FSODB:
             ("campaign", "TEXT"),
             ("frame_no", "INTEGER"),
             ("excluded", "INTEGER NOT NULL DEFAULT 0"),
+            ("one_sided", "INTEGER NOT NULL DEFAULT 0"),
         ):
             if column not in have:
                 self._conn.execute(f"ALTER TABLE events ADD COLUMN {column} {ddl}")
@@ -163,7 +164,7 @@ class FSODB:
         sql = """
             SELECT event_id, event_date,
                    COALESCE(display_title, title) AS name,
-                   campaign, frame_no, title AS source_title
+                   campaign, frame_no, one_sided, title AS source_title
             FROM events
             WHERE EXISTS (SELECT 1 FROM log_entries l WHERE l.event_id = events.event_id)
         """
@@ -204,6 +205,7 @@ class FSODB:
                    COALESCE(e.display_title, e.title)   AS name,
                    e.campaign,
                    e.frame_no,
+                   e.one_sided,
                    (SELECT COUNT(*) FROM participants p
                      WHERE p.event_id = e.event_id)     AS pilots,
                    (SELECT COUNT(*) FROM log_entries l
@@ -218,6 +220,37 @@ class FSODB:
             ORDER BY e.event_date DESC
         """).fetchall()
 
+    def get_campaign_summaries(self):
+        """One row per campaign - the unit users think in alongside frames.
+
+        An FSO campaign is normally three frames on consecutive Fridays;
+        see fsostats.campaigns for how they're grouped.
+        """
+        return self._conn.execute("""
+            SELECT e.campaign                            AS name,
+                   COUNT(*)                              AS frames,
+                   MIN(substr(e.event_date, 1, 10))      AS first_date,
+                   MAX(substr(e.event_date, 1, 10))      AS last_date,
+                   SUM(e.one_sided)                      AS one_sided,
+                   (SELECT COUNT(DISTINCT p.pilot) FROM participants p
+                     WHERE p.event_id IN (
+                       SELECT event_id FROM events x
+                        WHERE x.campaign = e.campaign AND x.excluded = 0)) AS pilots,
+                   (SELECT COUNT(*) FROM log_entries l
+                     WHERE l.action = 'sortie_start' AND l.event_id IN (
+                       SELECT event_id FROM events x
+                        WHERE x.campaign = e.campaign AND x.excluded = 0)) AS sorties,
+                   (SELECT COUNT(*) FROM log_entries l
+                     WHERE l.action = 'kill' AND l.event_id IN (
+                       SELECT event_id FROM events x
+                        WHERE x.campaign = e.campaign AND x.excluded = 0)) AS kills
+            FROM events e
+            WHERE e.excluded = 0 AND e.campaign IS NOT NULL
+              AND EXISTS (SELECT 1 FROM log_entries l WHERE l.event_id = e.event_id)
+            GROUP BY e.campaign
+            ORDER BY MAX(e.event_date) DESC
+        """).fetchall()
+
     def apply_campaign_metadata(self) -> dict[str, int]:
         """Recompute display_title / campaign / frame_no / excluded for
         every event from fsostats.campaigns.
@@ -227,30 +260,88 @@ class FSODB:
         """
         from fsostats import campaigns
 
-        rows = self._conn.execute("SELECT event_id, title FROM events").fetchall()
-        counts = {"named": 0, "excluded": 0, "ungrouped": 0}
-        updates = []
+        import datetime
+
+        rows = self._conn.execute(
+            "SELECT event_id, event_date, title FROM events ORDER BY event_date").fetchall()
+
+        # Frames whose log holds only one side. The other team's log was
+        # never posted and never turned up later - checked, no frame has
+        # a same-date counterpart. Flagged rather than dropped: the side
+        # that *was* posted is real data.
+        one_sided = {
+            r[0] for r in self._conn.execute(
+                "SELECT event_id FROM log_entries GROUP BY event_id "
+                "HAVING COUNT(DISTINCT side) = 1")
+        }
+
+        counts = {"curated": 0, "excluded": 0, "clustered": 0, "one_sided": 0}
+        clusterable = []
+        resolved: dict[int, tuple[str | None, int | None, bool]] = {}
         for row in rows:
             eid, title = row["event_id"], row["title"] or ""
             campaign, frame_no, is_excluded = campaigns.resolve(eid, title)
+            resolved[eid] = (campaign, frame_no, is_excluded)
             if is_excluded:
                 counts["excluded"] += 1
-            elif campaign is not None:
-                counts["named"] += 1
-            else:
-                counts["ungrouped"] += 1
+                continue
+            if campaign:
+                counts["curated"] += 1
+            clusterable.append({
+                "id": eid,
+                "date": datetime.date.fromisoformat(row["event_date"][:10]),
+                "title": title, "frame_no": frame_no, "campaign": campaign,
+            })
+
+        # Only frames with logs are clustered - a frame the site cannot
+        # render has nothing to group and would leave phantom gaps.
+        with_logs = {r[0] for r in self._conn.execute(
+            "SELECT DISTINCT event_id FROM log_entries")}
+        clusterable = [f for f in clusterable if f["id"] in with_logs]
+
+        groups = campaigns.cluster(clusterable)
+
+        # Campaign names repeat across the years - Battle of Britain ran
+        # in 2012, 2014, 2015 and 2016, Pantelleria three times - so the
+        # name alone cannot identify a campaign. Anything grouping by it
+        # would silently merge them: Pantelleria came out as one
+        # nine-frame campaign numbered 1,1,1,2,2,2,3,3,3. Repeated names
+        # get their year, and a second collision its month too.
+        names = [campaigns.campaign_name(g) for g in groups]
+        repeated = {n for n in names if names.count(n) > 1}
+        used: set[str] = set()
+        campaign_of: dict[int, str] = {}
+        for group, name in zip(groups, names):
+            if name in repeated:
+                start = min(f["date"] for f in group)
+                name = f"{name} ({start.year})"
+                if name in used:
+                    name = f"{name[:-1]}-{start:%m})"
+            used.add(name)
+            for frame in group:
+                campaign_of[frame["id"]] = name
+        counts["clustered"] = len(groups)
+
+        updates = []
+        for row in rows:
+            eid, title = row["event_id"], row["title"] or ""
+            curated, frame_no, is_excluded = resolved[eid]
+            campaign = curated or campaign_of.get(eid)
             if campaign and frame_no:
                 display = f"{campaign} - Frame {frame_no}"
             elif campaign:
                 display = campaign
             else:
                 display = title
-            updates.append((display, campaign, frame_no, int(is_excluded), eid))
+            is_one_sided = eid in one_sided
+            counts["one_sided"] += int(is_one_sided)
+            updates.append((display, campaign, frame_no, int(is_excluded),
+                            int(is_one_sided), eid))
 
         with self._conn:
             self._conn.executemany(
-                "UPDATE events SET display_title=?, campaign=?, frame_no=?, excluded=? "
-                "WHERE event_id=?",
+                "UPDATE events SET display_title=?, campaign=?, frame_no=?, "
+                "excluded=?, one_sided=? WHERE event_id=?",
                 updates,
             )
         return counts

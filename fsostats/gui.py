@@ -245,18 +245,12 @@ class App(ctk.CTk):
             font=ctk.CTkFont(size=13, weight="bold"),
         ).pack(side="left", padx=8, pady=8)
 
-        # Frame/campaign is the toggle every view needs, but campaign
-        # grouping is only done for the 46 hand-corrected frames so far
-        # (see PLAN.md), so it stays disabled rather than showing a
-        # half-populated unit.
-        self.scope = ctk.CTkSegmentedButton(bar, values=["Frames", "Campaigns"])
+        # Users think in both units: one events row is one frame, and an
+        # FSO campaign is normally three frames on consecutive Fridays.
+        self.scope = ctk.CTkSegmentedButton(
+            bar, values=["Frames", "Campaigns"], command=lambda _v: self._load_frames())
         self.scope.set("Frames")
-        self.scope.configure(state="disabled")
-        self.scope.pack(side="left", padx=(16, 4), pady=8)
-        ctk.CTkLabel(
-            bar, text="campaign grouping not built yet",
-            text_color=theme.BORDER_GRAY, font=ctk.CTkFont(size=10),
-        ).pack(side="left", pady=8)
+        self.scope.pack(side="left", padx=(16, 8), pady=8)
 
         ctk.CTkLabel(bar, text="Find:").pack(side="left", padx=(20, 4), pady=8)
         self.quick_filter = ctk.CTkEntry(bar, width=180, placeholder_text="filter the list")
@@ -367,7 +361,8 @@ class App(ctk.CTk):
             return
 
         self.pilot_summary.configure(text=(
-            f"{name}   |   {career['frames']} frames, {career['first_frame']} to "
+            f"{name}   |   {career['campaigns']} FSOs / {career['frames']} frames, "
+            f"{career['first_frame']} to "
             f"{career['last_frame']}   |   {career['sorties']:,} sorties   |   "
             f"{career['kills']:,} kills, {career['deaths']:,} deaths "
             f"(K/D {career['kd']:.2f})   |   {career['ground_kills']:,} ground kills"
@@ -686,22 +681,68 @@ class App(ctk.CTk):
     # ---------------- data ----------------
 
     def _load_frames(self):
+        if self.scope.get() == "Campaigns":
+            self._scope_unit = "campaigns"
+            rows = self.db.get_campaign_summaries()
+            self.frame_grid.set_columns(
+                ("Campaign", "Frames", "First", "Last", "Half-logged",
+                 "Pilots", "Sorties", "Kills"),
+                wide=("Campaign",))
+            for name, width in (
+                ("Campaign", 360), ("Frames", 70), ("First", 95), ("Last", 95),
+                ("Half-logged", 95), ("Pilots", 70), ("Sorties", 80), ("Kills", 70),
+            ):
+                self.frame_grid.tree.column(name, width=width, minwidth=45)
+            self.frame_grid.set_rows([
+                (r["name"], r["frames"], r["first_date"], r["last_date"],
+                 r["one_sided"] or "", r["pilots"], r["sorties"], r["kills"])
+                for r in rows
+            ])
+            span = f"{rows[-1]['first_date']} to {rows[0]['last_date']}" if rows else "no data"
+            self.status.configure(
+                text=f"{len(rows)} campaigns, {span}. "
+                     f"{len(self.pilot_entry._values):,} pilots.")
+            return
+
+        self._scope_unit = "frames"
         rows = self.db.get_frame_summaries()
+        self.frame_grid.set_columns(
+            ("ID", "Date", "Frame", "Campaign", "No", "Sides", "Pilots", "Sorties", "Kills"),
+            wide=("Frame", "Campaign"))
+        for name, width in (
+            ("ID", 70), ("Date", 100), ("Frame", 300), ("Campaign", 250),
+            ("No", 45), ("Sides", 60), ("Pilots", 70), ("Sorties", 80), ("Kills", 70),
+        ):
+            self.frame_grid.tree.column(name, width=width, minwidth=40)
         self.frame_grid.set_rows([
             (r["event_id"], r["date"], r["name"], r["campaign"] or "",
-             r["frame_no"] or "", r["pilots"], r["sorties"], r["kills"])
+             r["frame_no"] or "",
+             # 47 frames hold only one team's log; the other was never
+             # posted and never turned up later.
+             "one" if r["one_sided"] else "both",
+             r["pilots"], r["sorties"], r["kills"])
             for r in rows
         ])
         span = f"{rows[-1]['date']} to {rows[0]['date']}" if rows else "no data"
+        half = sum(1 for r in rows if r["one_sided"])
         self.status.configure(
-            text=f"{len(rows)} frames, {span}. "
-                 f"{len(self.pilot_entry._values):,} pilots."
+            text=f"{len(rows)} frames, {span}. {len(self.pilot_entry._values):,} pilots. "
+                 f"{half} frames have only one side's log."
         )
 
     def _on_grid_change(self, rows):
-        pilots = sum(r[5] for r in rows)
-        sorties = sum(r[6] for r in rows)
-        kills = sum(r[7] for r in rows)
+        if getattr(self, "_scope_unit", "frames") == "campaigns":
+            frames = sum(r[1] for r in rows)
+            pilots = sum(r[5] for r in rows)
+            sorties = sum(r[6] for r in rows)
+            kills = sum(r[7] for r in rows)
+            self.frame_totals.configure(
+                text=f"{len(rows)} campaigns shown   |   {frames:,} frames   |   "
+                     f"{pilots:,} pilot slots   |   {sorties:,} sorties   |   {kills:,} kills")
+            return
+        pilots = sum(r[6] for r in rows)
+        sorties = sum(r[7] for r in rows)
+        kills = sum(r[8] for r in rows)
         self.frame_totals.configure(
             text=f"{len(rows)} frames shown   |   {pilots:,} pilot slots   |   "
                  f"{sorties:,} sorties   |   {kills:,} kills"

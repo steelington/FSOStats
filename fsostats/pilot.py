@@ -77,11 +77,15 @@ def career(db, pilot: str) -> dict:
         ("frames", "sorties", "kills", "ground_kills", "deaths", "landed",
          "bailed", "ditched", "captured", "crashed", "exploded", "aircraft_types"))}
     stats["kd"] = stats["kills"] / stats["deaths"] if stats["deaths"] else float(stats["kills"])
-    first_last = db.execute("""
-        SELECT MIN(substr(e.event_date,1,10)), MAX(substr(e.event_date,1,10))
+    # Frames and FSOs are both units users think in: an FSO campaign is
+    # normally three frames on consecutive Fridays.
+    row = db.execute("""
+        SELECT MIN(substr(e.event_date,1,10)), MAX(substr(e.event_date,1,10)),
+               COUNT(DISTINCT e.campaign)
         FROM participants p JOIN events e ON e.event_id = p.event_id AND e.excluded = 0
         WHERE p.pilot = :pilot COLLATE NOCASE""", {"pilot": pilot}).fetchone()
-    stats["first_frame"], stats["last_frame"] = first_last[0], first_last[1]
+    stats["first_frame"], stats["last_frame"] = row[0], row[1]
+    stats["campaigns"] = row[2] or 0
     return stats
 
 
