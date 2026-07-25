@@ -14,7 +14,7 @@ import tkinter as tk
 
 import customtkinter as ctk
 
-from fsostats import theme
+from fsostats import headtohead, theme
 from fsostats.db import FSODB
 from fsostats.grid import GridView
 from fsostats.paths import get_database_path
@@ -292,10 +292,10 @@ class App(ctk.CTk):
         )
         self.frame_totals.pack(anchor="w", padx=10, pady=(0, 8))
 
+        self._build_head_to_head(self.tabs.tab("Head-to-Head"))
+
         for name, note in (
             ("Pilot", "Career totals, aircraft flown, and the frames this pilot appeared in."),
-            ("Head-to-Head", "Who a pilot killed, who killed them, and the record against any\n"
-                             "named opponent across 18 years."),
             ("Squad", "Squad rosters and performance over time, from squad_stats."),
             ("Leaderboards", "All-time boards aggregated from top_entries."),
         ):
@@ -309,6 +309,98 @@ class App(ctk.CTk):
                 holder, text=note, text_color=theme.TEXT_BODY,
                 font=ctk.CTkFont(size=12), justify="center",
             ).pack()
+
+    # ---------------- head to head ----------------
+
+    def _build_head_to_head(self, tab):
+        self.h2h_summary = ctk.CTkLabel(
+            tab, text="Choose a pilot above to see who they fought.",
+            text_color=theme.TEXT_BODY, font=ctk.CTkFont(size=13, weight="bold"),
+            justify="left",
+        )
+        self.h2h_summary.pack(anchor="w", padx=10, pady=(8, 4))
+
+        split = ctk.CTkFrame(tab, fg_color="transparent")
+        split.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+        split.grid_columnconfigure(0, weight=3)
+        split.grid_columnconfigure(1, weight=4)
+        split.grid_rowconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            split, text="Opponents", text_color=theme.TEXT_HEADING,
+            font=ctk.CTkFont(size=12, weight="bold"),
+        ).grid(row=0, column=0, sticky="w", padx=4, pady=(0, 2))
+        self.h2h_detail_label = ctk.CTkLabel(
+            split, text="Engagements", text_color=theme.TEXT_HEADING,
+            font=ctk.CTkFont(size=12, weight="bold"),
+        )
+        self.h2h_detail_label.grid(row=0, column=1, sticky="w", padx=4, pady=(0, 2))
+
+        self.h2h_grid = GridView(
+            split,
+            columns=("Opponent", "Killed", "Killed by", "Diff", "Ratio", "Frames"),
+            wide=("Opponent",), height=16,
+        )
+        for name, width in (
+            ("Opponent", 150), ("Killed", 70), ("Killed by", 80),
+            ("Diff", 60), ("Ratio", 70), ("Frames", 70),
+        ):
+            self.h2h_grid.tree.column(name, width=width, minwidth=45)
+        self.h2h_grid.container.grid(row=1, column=0, sticky="nsew", padx=4)
+        # Selecting an opponent drives the engagement list beside it.
+        self.h2h_grid.tree.bind("<<TreeviewSelect>>", self._on_opponent_selected)
+
+        self.h2h_detail = GridView(
+            split,
+            columns=("Date", "Result", "Aircraft lost", "Frame"),
+            wide=("Frame", "Aircraft lost"), height=16,
+        )
+        for name, width in (
+            ("Date", 90), ("Result", 90), ("Aircraft lost", 130), ("Frame", 300),
+        ):
+            self.h2h_detail.tree.column(name, width=width, minwidth=45)
+        self.h2h_detail.container.grid(row=1, column=1, sticky="nsew", padx=4)
+
+    def _load_head_to_head(self, pilot):
+        self._h2h_pilot = pilot
+        summary = headtohead.summary(self.db, pilot)
+        if not summary["opponents"]:
+            self.h2h_summary.configure(
+                text=f"{pilot}: no recorded engagements against a named pilot."
+            )
+            self.h2h_grid.set_rows([])
+            self.h2h_detail.set_rows([])
+            return
+
+        victim = summary["top_victim"]
+        nemesis = summary["top_nemesis"]
+        self.h2h_summary.configure(
+            text=(
+                f"{pilot}   |   {summary['kills']} killed, {summary['deaths']} killed by "
+                f"(ratio {summary['ratio']:.2f})   |   {summary['opponents']} opponents"
+                f"   |   favourite target: {victim.name} x{victim.killed}"
+                f"   |   nemesis: {nemesis.name} x{nemesis.killed_by}"
+            )
+        )
+        self.h2h_grid.set_rows([
+            (o.name, o.killed, o.killed_by, f"{o.diff:+d}", o.ratio, o.frames)
+            for o in headtohead.opponents(self.db, pilot)
+        ])
+        self.h2h_detail.set_rows([])
+        self.h2h_detail_label.configure(text="Engagements - select an opponent")
+
+    def _on_opponent_selected(self, _event):
+        selection = self.h2h_grid.tree.selection()
+        if not selection or not getattr(self, "_h2h_pilot", None):
+            return
+        opponent = self.h2h_grid.tree.item(selection[0], "values")[0]
+        rows = headtohead.record_against(self.db, self._h2h_pilot, opponent)
+        self.h2h_detail.set_rows([
+            (r["date"], r["direction"], r["plane"], r["frame"]) for r in rows
+        ])
+        self.h2h_detail_label.configure(
+            text=f"{self._h2h_pilot} vs {opponent} - {len(rows)} engagements"
+        )
 
     # ---------------- status bar ----------------
 
@@ -360,13 +452,17 @@ class App(ctk.CTk):
         if not name:
             self.status.configure(text="Type a pilot handle first.")
             return
-        # The pilot view is next; for now confirm the handle resolves so
-        # the type-ahead is testable against the real 4,318 names.
-        known = name in self.pilot_entry._values
-        self.status.configure(
-            text=f"{name}: {'known pilot' if known else 'no such pilot in the logs'} "
-                 f"- pilot view not built yet."
-        )
+        # Handles fold case throughout, so the typed spelling need not
+        # match the logs exactly.
+        folded = {v.casefold() for v in self.pilot_entry._values}
+        if name.casefold() not in folded:
+            self.status.configure(text=f"{name}: no such pilot in the logs.")
+            return
+        self.status.configure(text=f"{name}: loading head-to-head...")
+        self.update_idletasks()
+        self._load_head_to_head(name)
+        self.tabs.set("Head-to-Head")
+        self.status.configure(text=f"{name}: head-to-head loaded.")
 
 
 def main() -> None:

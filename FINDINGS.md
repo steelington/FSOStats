@@ -123,6 +123,57 @@ ones.
 - `scrape.pid` was a stale lock from an interrupted run; nothing reads
   it. Delete or implement properly.
 
+## Head-to-head: how a shootdown is logged (25 Jul 2026)
+
+One shootdown can be written twice, once from each side's log:
+
+    kill    pilot = killer,  other_pilot = victim,  plane = the VICTIM's aircraft
+    death   pilot = victim,  other_pilot = killer,  plane = null
+
+`assist` is different again and easy to misread: `other_pilot` is the
+*killer being helped*, and the victim is in `detail` ("Helps BTDiver
+shoot down 800nates").
+
+Neither table alone is complete:
+
+| | rows | names the other party |
+|---|---|---|
+| `kill` | 93,137 | 93,137 (100%) |
+| `death` | 78,265 | 50,996 (65%) |
+
+The unnamed deaths are captures (10,042), crashes (9,182) and ack -
+nobody to credit. Of the deaths that *do* name a killer, 91.4% have a
+matching kill row and **4,410 do not**: a team's log can record being
+shot down by someone whose own side's log never recorded the kill.
+
+So `headtohead.py` takes every kill row and adds only those death rows
+with no matching kill. Using both wholesale would double-count the
+46,586 overlapping shootdowns; using kills alone would lose 4,410
+engagements.
+
+It also filters `events.excluded = 0` - the duplicate submissions
+(2168/2169, 2756/2757) are byte-identical, so counting both would
+double every engagement in those frames.
+
+### Handles fold case
+
+**165 handles differ from another only by capitalisation** (`11DUKE11`
+and `11Duke11`), so every comparison is `COLLATE NOCASE` or a pilot's
+record splits across spellings.
+
+That needs its own indexes: a plain index cannot serve a NOCASE
+comparison, and without `idx_log_pilot_nocase` / `idx_log_other_nocase`
+a single lookup takes minutes rather than 0.27s. Both are in `SCHEMA`
+now, along with an `other_pilot` index - head-to-head reads by the other
+party as often as by the pilot.
+
+Pilots who genuinely *renamed* are a separate problem; AHSTATS solved it
+with identity groups and PLAN.md has porting that as an open item.
+
+TODO: 3,862 kill rows name a victim who isn't a participant of that
+event. Worth understanding before career totals are trusted - it may be
+case drift, or a side roster the page didn't list.
+
 ## Database size (for shipping with the exe)
 
 Measured 25 Jul 2026, 586 events / 589,621 log entries:

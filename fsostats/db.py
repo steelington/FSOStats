@@ -80,6 +80,17 @@ CREATE TABLE IF NOT EXISTS top_entries (
 CREATE INDEX IF NOT EXISTS idx_log_entries_pilot ON log_entries(pilot);
 CREATE INDEX IF NOT EXISTS idx_log_entries_action ON log_entries(action);
 CREATE INDEX IF NOT EXISTS idx_participants_pilot ON participants(pilot);
+
+-- Head-to-head reads log_entries by the *other* party as often as by
+-- the pilot, and folds case throughout: 165 handles differ from another
+-- only by capitalisation. A plain index can't serve a NOCASE
+-- comparison, hence the separate NOCASE pair - without them a single
+-- head-to-head lookup takes minutes instead of a fraction of a second.
+CREATE INDEX IF NOT EXISTS idx_log_entries_other_pilot ON log_entries(other_pilot);
+CREATE INDEX IF NOT EXISTS idx_log_entries_event_action ON log_entries(event_id, action);
+CREATE INDEX IF NOT EXISTS idx_log_pilot_nocase ON log_entries(pilot COLLATE NOCASE, action);
+CREATE INDEX IF NOT EXISTS idx_log_other_nocase ON log_entries(other_pilot COLLATE NOCASE, action);
+CREATE INDEX IF NOT EXISTS idx_participants_pilot_nocase ON participants(pilot COLLATE NOCASE);
 """
 
 
@@ -159,6 +170,12 @@ class FSODB:
         if not include_excluded:
             sql += " AND excluded = 0"
         return self._conn.execute(sql + " ORDER BY event_date DESC").fetchall()
+
+    def execute(self, sql: str, params=()):
+        """Run a read-only query. Lets query modules such as
+        fsostats.headtohead take an FSODB or a bare sqlite3 connection
+        interchangeably."""
+        return self._conn.execute(sql, params)
 
     def get_pilot_names(self) -> list[str]:
         """Every pilot who appears in a frame that is shown, sorted.
