@@ -256,12 +256,27 @@ class App(ctk.CTk):
             "Ground": "Ground targets destroyed flying this type.",
         })
         self.pilot_frames.set_column_help({
-            "Side": "The side label the event page carried. These are "
-                    "unreliable - themed names, occasional duplicates, and a "
-                    "few frames with the labels swapped outright - so treat it "
-                    "as recorded, not as meaning Allied or Axis.",
+            "Role": "Which side the team actually fought for, inferred from "
+                    "the aircraft it flew - 97.9% accurate, and the one to "
+                    "trust. It catches the frames whose labels are swapped "
+                    "outright, and reads themed names correctly.",
+            "Side": "The side label the event page carried, shown as recorded. "
+                    "Unreliable on its own: themed names, occasional "
+                    "duplicates, and a few frames labelled backwards. Compare "
+                    "it with Role.",
             "Squad": "The squad this pilot flew with in this frame.",
             "Aircraft": "Every type the pilot took off in during this frame.",
+        })
+        self.detail_grid.set_column_help({
+            "Role": "Inferred from the aircraft the team flew, not from the "
+                    "label - see the Side column.",
+            "Side": "The label the submitter typed for this team.",
+            "Aircraft": "Every type this pilot took off in during the frame.",
+            "Kills": self.KILL_HELP,
+        })
+        self.squad_roster.set_column_help({
+            "Pilot": "Double-click to open this pilot's career.",
+            "Frames": "Frames flown for this squad.",
         })
         self.h2h_grid.set_column_help({
             "Opponent": "Every pilot this one traded shootdowns with.",
@@ -402,7 +417,8 @@ class App(ctk.CTk):
         self.tabs = ctk.CTkTabview(self, fg_color=theme.PANEL_BG)
         self.tabs.pack(fill="both", expand=True, padx=10, pady=4)
 
-        for name in ("Frames", "Pilot", "Head-to-Head", "Squad", "Leaderboards"):
+        for name in ("Frames", "Frame detail", "Pilot", "Head-to-Head",
+                     "Squad", "Leaderboards"):
             self.tabs.add(name)
 
         frames_tab = self.tabs.tab("Frames")
@@ -412,7 +428,10 @@ class App(ctk.CTk):
             wide=("Frame", "Campaign"),
             height=20,
             on_change=self._on_grid_change,
+            title="frames",
         )
+        # Double-click a frame (or a campaign's first frame) to open it.
+        self.frame_grid.tree.bind("<Double-1>", self._on_frame_activated)
         # GridView's default 150px is far too narrow for frame titles,
         # which run to "Gallands Gambit: Operation Donnerkeil - Frame 3".
         for name, width in (
@@ -428,10 +447,111 @@ class App(ctk.CTk):
         )
         self.frame_totals.pack(anchor="w", padx=10, pady=(0, 8))
 
+        self._build_frame_detail(self.tabs.tab("Frame detail"))
         self._build_pilot(self.tabs.tab("Pilot"))
         self._build_head_to_head(self.tabs.tab("Head-to-Head"))
         self._build_squad(self.tabs.tab("Squad"))
         self._build_leaderboards(self.tabs.tab("Leaderboards"))
+
+    # ---------------- frame detail ----------------
+
+    def _build_frame_detail(self, tab):
+        self.detail_title = ctk.CTkLabel(
+            tab, text="Double-click a frame in the Frames tab to open it.",
+            text_color=theme.TEXT_HEADING, font=ctk.CTkFont(size=15, weight="bold"),
+            justify="left", wraplength=1180, anchor="w")
+        self.detail_title.pack(anchor="w", padx=10, pady=(8, 2))
+
+        self.detail_teams = ctk.CTkLabel(
+            tab, text="", text_color=theme.TEXT_BODY,
+            font=ctk.CTkFont(size=12), justify="left", wraplength=1180, anchor="w")
+        self.detail_teams.pack(anchor="w", padx=10, pady=(0, 6))
+
+        self.detail_grid = GridView(
+            tab,
+            columns=("Pilot", "Squad", "Side", "Role", "Aircraft",
+                     "Sorties", "Kills", "Deaths", "Ground"),
+            wide=("Pilot", "Squad", "Aircraft"), height=20, title="frame")
+        for name, width in (
+            ("Pilot", 140), ("Squad", 190), ("Side", 100), ("Role", 80),
+            ("Aircraft", 220), ("Sorties", 70), ("Kills", 60),
+            ("Deaths", 65), ("Ground", 70),
+        ):
+            self.detail_grid.tree.column(name, width=width, minwidth=45)
+        self.detail_grid.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+        self.detail_grid.tree.bind("<Double-1>", self._on_detail_pilot_activated)
+
+    def _load_frame_detail(self, event_id):
+        data = self.db.get_frame_detail(event_id)
+        if not data:
+            return
+        header = data["header"]
+        self._detail_event_id = event_id
+
+        bits = [header["name"], header["date"]]
+        if header["campaign"]:
+            bits.append(f"campaign: {header['campaign']}")
+        if header["submitter"]:
+            bits.append(f"posted by {header['submitter']}")
+        self.detail_title.configure(text="   |   ".join(bits))
+
+        lines = []
+        for team in data["teams"]:
+            role = team["role"] or "unknown"
+            confidence = team["confidence"] or 0.0
+            # The label is what a submitter typed; the role is what they
+            # flew. Showing both, with confidence, is more honest than
+            # silently replacing one with the other.
+            lines.append(
+                f"{team['side']}  ->  {role} ({confidence:.0%} confident)   "
+                f"{team['pilots']} pilots, {team['kills']} kills, "
+                f"{team['deaths']} deaths, {team['obj_destroyed']} ground")
+        if header["one_sided"]:
+            lines.append("Only one team's log was posted for this frame; "
+                         "the other was never published.")
+        if header["source_title"] != header["name"]:
+            lines.append(f"Posted as: {header['source_title']!r}")
+        self.detail_teams.configure(text="\n".join(lines))
+
+        self.detail_grid.set_rows([
+            (p["pilot"], p["squad"] or "", p["side"], p["role"] or "",
+             (p["planes"] or "").replace(",", ", "),
+             p["sorties"] or 0, p["kills"] or 0, p["deaths"] or 0, p["ground"] or 0)
+            for p in data["pilots"]
+        ])
+        self.tabs.set("Frame detail")
+
+    def _on_frame_activated(self, _event):
+        selection = self.frame_grid.tree.selection()
+        if not selection:
+            return
+        values = self.frame_grid.tree.item(selection[0], "values")
+        if self.scope.get() == "Campaigns":
+            # Campaign rows carry a name, not an id - open its first frame.
+            row = self.db.execute(
+                "SELECT event_id FROM events WHERE campaign = ? AND excluded = 0 "
+                "ORDER BY event_date LIMIT 1", (values[0],)).fetchone()
+            if row:
+                self._load_frame_detail(row[0])
+            return
+        try:
+            self._load_frame_detail(int(values[0]))
+        except (TypeError, ValueError):
+            pass
+
+    def _on_detail_pilot_activated(self, _event):
+        selection = self.detail_grid.tree.selection()
+        if selection:
+            self._open_pilot(self.detail_grid.tree.item(selection[0], "values")[0])
+
+    # ---------------- navigation ----------------
+
+    def _open_pilot(self, name):
+        """Jump to a pilot from wherever their name was clicked."""
+        if not name:
+            return
+        self.pilot_entry.set(name)
+        self._on_show()
 
     # ---------------- pilot ----------------
 
@@ -468,7 +588,7 @@ class App(ctk.CTk):
 
         self.pilot_aircraft = GridView(
             split, columns=("Aircraft", "Sorties", "Kills", "Deaths", "K/D", "Ground"),
-            wide=("Aircraft",), height=12,
+            wide=("Aircraft",), height=12, title="pilot aircraft",
         )
         for name, width in (
             ("Aircraft", 170), ("Sorties", 70), ("Kills", 60),
@@ -479,11 +599,13 @@ class App(ctk.CTk):
 
         self.pilot_frames = GridView(
             split,
-            columns=("Date", "Frame", "Side", "Squad", "Aircraft", "Sorties", "Kills", "Deaths"),
-            wide=("Frame", "Aircraft", "Squad"), height=12,
+            columns=("Date", "Frame", "Role", "Side", "Squad", "Aircraft",
+                     "Sorties", "Kills", "Deaths"),
+            wide=("Frame", "Aircraft", "Squad"), height=12, title="pilot frames",
         )
+        self.pilot_frames.tree.bind("<Double-1>", self._on_pilot_frame_activated)
         for name, width in (
-            ("Date", 90), ("Frame", 240), ("Side", 90), ("Squad", 90),
+            ("Date", 90), ("Frame", 230), ("Role", 75), ("Side", 90), ("Squad", 90),
             ("Aircraft", 170), ("Sorties", 65), ("Kills", 55), ("Deaths", 60),
         ):
             self.pilot_frames.tree.column(name, width=width, minwidth=45)
@@ -524,7 +646,7 @@ class App(ctk.CTk):
             for a in pilot.aircraft(self.db, name)
         ])
         self.pilot_frames.set_rows([
-            (f["date"], f["frame"], f["side"], f["squad"], f["planes"],
+            (f["date"], f["frame"], f["role"], f["side"], f["squad"], f["planes"],
              f["sorties"], f["kills"], f["deaths"])
             for f in pilot.frames(self.db, name)
         ])
@@ -565,7 +687,7 @@ class App(ctk.CTk):
         self.h2h_grid = GridView(
             split,
             columns=("Opponent", "Killed", "Killed by", "Diff", "Ratio", "Frames"),
-            wide=("Opponent",), height=16,
+            wide=("Opponent",), height=16, title="opponents",
         )
         for name, width in (
             ("Opponent", 150), ("Killed", 70), ("Killed by", 80),
@@ -573,13 +695,15 @@ class App(ctk.CTk):
         ):
             self.h2h_grid.tree.column(name, width=width, minwidth=45)
         self.h2h_grid.container.grid(row=1, column=0, sticky="nsew", padx=4)
-        # Selecting an opponent drives the engagement list beside it.
+        # Selecting an opponent drives the engagement list beside it;
+        # double-clicking opens that opponent's own career.
         self.h2h_grid.tree.bind("<<TreeviewSelect>>", self._on_opponent_selected)
+        self.h2h_grid.tree.bind("<Double-1>", self._on_opponent_activated)
 
         self.h2h_detail = GridView(
             split,
             columns=("Date", "Result", "Aircraft lost", "Frame"),
-            wide=("Frame", "Aircraft lost"), height=16,
+            wide=("Frame", "Aircraft lost"), height=16, title="engagements",
         )
         for name, width in (
             ("Date", 90), ("Result", 90), ("Aircraft lost", 130), ("Frame", 300),
@@ -617,6 +741,11 @@ class App(ctk.CTk):
         ])
         self.h2h_detail.set_rows([])
         self.h2h_detail_label.configure(text="Engagements - select an opponent")
+
+    def _on_opponent_activated(self, _event):
+        selection = self.h2h_grid.tree.selection()
+        if selection:
+            self._open_pilot(self.h2h_grid.tree.item(selection[0], "values")[0])
 
     def _on_opponent_selected(self, _event):
         selection = self.h2h_grid.tree.selection()
@@ -661,7 +790,7 @@ class App(ctk.CTk):
         self.squad_grid = GridView(
             split,
             columns=("Squad", "Frames", "Kills", "Deaths", "K/D", "Ground", "First", "Last"),
-            wide=("Squad",), height=16,
+            wide=("Squad",), height=14, title="squads",
         )
         for name, width in (
             ("Squad", 220), ("Frames", 70), ("Kills", 65), ("Deaths", 70),
@@ -673,7 +802,7 @@ class App(ctk.CTk):
 
         self.squad_detail = GridView(
             split, columns=("Date", "Frame", "Side", "Pilots", "Kills", "Deaths", "Ground"),
-            wide=("Frame",), height=16,
+            wide=("Frame",), height=14, title="squad frames",
         )
         for name, width in (
             ("Date", 90), ("Frame", 260), ("Side", 90),
@@ -681,6 +810,25 @@ class App(ctk.CTk):
         ):
             self.squad_detail.tree.column(name, width=width, minwidth=45)
         self.squad_detail.container.grid(row=1, column=1, sticky="nsew", padx=4)
+        self.squad_detail.tree.bind("<Double-1>", self._on_squad_frame_activated)
+
+        # Roster and trend share the bottom strip.
+        bottom = ctk.CTkFrame(tab, fg_color="transparent")
+        bottom.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+        bottom.grid_columnconfigure(0, weight=4)
+        bottom.grid_columnconfigure(1, weight=5)
+        bottom.grid_rowconfigure(0, weight=1)
+
+        self.squad_roster = GridView(
+            bottom, columns=("Pilot", "Frames", "First", "Last"),
+            wide=("Pilot",), height=8, title="squad roster")
+        for name, width in (("Pilot", 150), ("Frames", 70), ("First", 95), ("Last", 95)):
+            self.squad_roster.tree.column(name, width=width, minwidth=45)
+        self.squad_roster.container.grid(row=0, column=0, sticky="nsew", padx=4)
+        self.squad_roster.tree.bind("<Double-1>", self._on_roster_activated)
+
+        self.squad_chart = TrendChart(bottom, height=180)
+        self.squad_chart.grid(row=0, column=1, sticky="nsew", padx=4)
 
     def _load_squads(self):
         self._squads = squads.all_squads(self.db)
@@ -714,6 +862,14 @@ class App(ctk.CTk):
              h["deaths"], h["obj"])
             for h in history
         ])
+        self.squad_roster.set_rows([
+            (p["pilot"], p["frames"], p["first"], p["last"]) for p in roster
+        ])
+        years = self.db.get_squad_yearly(spellings)
+        self.squad_chart.plot(
+            [(int(y), kills) for y, kills, _frames in years],
+            title=f"{name} - kills per year", ylabel="kills", xlabel="Year",
+            message="No data.")
         top = ", ".join(f"{p['pilot']} ({p['frames']})" for p in roster[:3])
         # history has one row per side, and a squad can field teams on
         # both sides of a frame, so the row count is not the frame count.
@@ -724,6 +880,22 @@ class App(ctk.CTk):
             text=f"{name} - {frames_flown} frames{both}, {len(roster)} pilots.  "
                  f"Most frames: {top}"
         )
+
+    def _on_roster_activated(self, _event):
+        selection = self.squad_roster.tree.selection()
+        if selection:
+            self._open_pilot(self.squad_roster.tree.item(selection[0], "values")[0])
+
+    def _on_squad_frame_activated(self, _event):
+        selection = self.squad_detail.tree.selection()
+        if not selection:
+            return
+        date, frame = self.squad_detail.tree.item(selection[0], "values")[:2]
+        row = self.db.execute(
+            "SELECT event_id FROM events WHERE substr(event_date,1,10) = ? "
+            "AND COALESCE(display_title, title) = ? LIMIT 1", (date, frame)).fetchone()
+        if row:
+            self._load_frame_detail(row[0])
 
     # ---------------- leaderboards ----------------
 
@@ -770,19 +942,40 @@ class App(ctk.CTk):
 
         self.board_totals = GridView(
             split, columns=("#", "Name", "Total", "Frames", "Per frame"),
-            wide=("Name",), height=18)
+            wide=("Name",), height=18, title="leaderboard totals")
         for name, width in (("#", 50), ("Name", 210), ("Total", 80),
                             ("Frames", 75), ("Per frame", 85)):
             self.board_totals.tree.column(name, width=width, minwidth=40)
         self.board_totals.container.grid(row=1, column=0, sticky="nsew", padx=4)
+        self.board_totals.tree.bind("<Double-1>", self._on_board_activated)
 
         self.board_podium = GridView(
             split, columns=("#", "Name", "Wins", "Top 3", "Placings", "Best"),
-            wide=("Name",), height=18)
+            wide=("Name",), height=18, title="podium finishes")
         for name, width in (("#", 50), ("Name", 200), ("Wins", 65),
                             ("Top 3", 65), ("Placings", 80), ("Best", 60)):
             self.board_podium.tree.column(name, width=width, minwidth=40)
         self.board_podium.container.grid(row=1, column=1, sticky="nsew", padx=4)
+        self.board_podium.tree.bind("<Double-1>", self._on_board_activated)
+
+    def _on_board_activated(self, event):
+        """Open a pilot from either board. Squad boards name squads, not
+        pilots, so those select the squad instead."""
+        grid = self.board_totals if event.widget is self.board_totals.tree else self.board_podium
+        selection = grid.tree.selection()
+        if not selection:
+            return
+        name = grid.tree.item(selection[0], "values")[1]
+        kind = self.LEADERBOARDS[self.board_choice.get()][0]
+        if kind == "pilot":
+            self._open_pilot(name)
+            return
+        self.tabs.set("Squad")
+        for item in self.squad_grid.tree.get_children():
+            if self.squad_grid.tree.item(item, "values")[0] == name:
+                self.squad_grid.tree.selection_set(item)
+                self.squad_grid.tree.see(item)
+                break
 
     def _load_board(self):
         kind, metric, category = self.LEADERBOARDS[self.board_choice.get()]
@@ -891,9 +1084,9 @@ class App(ctk.CTk):
         self.progress.pack_forget()
 
         if self._update_added:
-            # New frames arrive untitled and ungrouped; this names them
-            # and re-runs the campaign clustering over the whole set.
+            # New frames arrive untitled, ungrouped and unclassified.
             self.db.apply_campaign_metadata()
+            self.db.apply_side_roles()
             self.pilot_entry.set_values(self.db.get_pilot_names())
             self._load_frames()
             self._load_squads()
@@ -972,7 +1165,14 @@ class App(ctk.CTk):
         )
 
     def _on_quick_filter(self, _event):
-        self.frame_grid.set_quick_filter(self.quick_filter.get())
+        # Every grid has its own filter box now; keep the one in the top
+        # bar in step with the Frames grid rather than having the two
+        # quietly disagree.
+        text = self.quick_filter.get()
+        if self.frame_grid.quick_entry is not None:
+            self.frame_grid.quick_entry.delete(0, "end")
+            self.frame_grid.quick_entry.insert(0, text)
+        self.frame_grid.set_quick_filter(text)
 
     def _on_pilot_chosen(self, name):
         self._on_show()
@@ -994,6 +1194,19 @@ class App(ctk.CTk):
         self._load_head_to_head(name)
         self.tabs.set("Pilot")
         self.status.configure(text=f"{name}: loaded.")
+
+    def _on_pilot_frame_activated(self, _event):
+        """A pilot's frame row -> that frame's detail. The row carries a
+        date and title rather than an id, so it's looked up."""
+        selection = self.pilot_frames.tree.selection()
+        if not selection:
+            return
+        date, frame = self.pilot_frames.tree.item(selection[0], "values")[:2]
+        row = self.db.execute(
+            "SELECT event_id FROM events WHERE substr(event_date,1,10) = ? "
+            "AND COALESCE(display_title, title) = ? LIMIT 1", (date, frame)).fetchone()
+        if row:
+            self._load_frame_detail(row[0])
 
 
 def main() -> None:

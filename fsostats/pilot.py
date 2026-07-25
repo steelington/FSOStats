@@ -156,16 +156,23 @@ def frames(db, pilot: str) -> list[dict]:
         ORDER BY e.event_date DESC
     """, {"pilot": pilot})
 
+    # `role` is inferred from the aircraft the team flew (sides.py,
+    # 97.9% accurate) and is the trustworthy one; `side` is the label
+    # the submitter typed. Both are returned so the UI can show the
+    # inference without hiding the source.
     sides = {
-        r[0]: (r[1] or "", r[2] or "")
+        r[0]: (r[1] or "", r[2] or "", r[3] or "")
         for r in db.execute(
-            "SELECT event_id, side, squad FROM participants "
-            "WHERE pilot = :pilot COLLATE NOCASE", {"pilot": pilot})
+            "SELECT p.event_id, p.side, p.squad, r.role FROM participants p "
+            "LEFT JOIN side_roles r ON r.event_id = p.event_id AND r.side = p.side "
+            "WHERE p.pilot = :pilot COLLATE NOCASE", {"pilot": pilot})
     }
+    blank = ("", "", "")
     return [
         {"event_id": r[0], "date": r[1], "frame": r[2],
-         "side": sides.get(r[0], ("", ""))[0],
-         "squad": sides.get(r[0], ("", ""))[1],
+         "side": sides.get(r[0], blank)[0],
+         "squad": sides.get(r[0], blank)[1],
+         "role": sides.get(r[0], blank)[2],
          "sorties": r[3] or 0, "kills": r[4] or 0,
          "deaths": r[5] or 0, "ground_kills": r[6] or 0,
          "planes": (r[7] or "").replace(",", ", ")}

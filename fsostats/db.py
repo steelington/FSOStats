@@ -77,6 +77,18 @@ CREATE TABLE IF NOT EXISTS top_entries (
     PRIMARY KEY (event_id, side, category, rank)
 );
 
+-- The historical role a team actually fought for, inferred from the
+-- aircraft it flew (fsostats.sides). Kept beside the parsed label
+-- rather than replacing it: the raw page data stays faithful, and the
+-- label is what a submitter typed while this is what they flew.
+CREATE TABLE IF NOT EXISTS side_roles (
+    event_id INTEGER NOT NULL,
+    side TEXT NOT NULL,
+    role TEXT NOT NULL,          -- allied | axis | unknown
+    confidence REAL NOT NULL,    -- mean per-sortie vote, 0..1
+    PRIMARY KEY (event_id, side)
+);
+
 CREATE INDEX IF NOT EXISTS idx_log_entries_pilot ON log_entries(pilot);
 CREATE INDEX IF NOT EXISTS idx_log_entries_action ON log_entries(action);
 CREATE INDEX IF NOT EXISTS idx_participants_pilot ON participants(pilot);
@@ -219,6 +231,114 @@ class FSODB:
               AND EXISTS (SELECT 1 FROM log_entries l WHERE l.event_id = e.event_id)
             ORDER BY e.event_date DESC
         """).fetchall()
+
+    def get_frame_detail(self, event_id: int) -> dict:
+        """Everything about one frame: header, the two teams, and every
+        pilot's result in it."""
+        header = self._conn.execute("""
+            SELECT event_id, substr(event_date, 1, 10) AS date,
+                   COALESCE(display_title, title) AS name,
+                   title AS source_title, campaign, frame_no, one_sided, submitter
+            FROM events WHERE event_id = ?""", (event_id,)).fetchone()
+        if header is None:
+            return {}
+
+        teams = self._conn.execute("""
+            SELECT s.side, s.pilots, s.kills, s.deaths, s.obj_destroyed,
+                   r.role, r.confidence
+            FROM side_stats s
+            LEFT JOIN side_roles r ON r.event_id = s.event_id AND r.side = s.side
+            WHERE s.event_id = ?
+            ORDER BY s.kills DESC""", (event_id,)).fetchall()
+
+        pilots = self._conn.execute("""
+            SELECT p.pilot, p.squad, p.side, r.role,
+                   SUM(l.action = 'sortie_start') AS sorties,
+                   SUM(l.action = 'kill')         AS kills,
+                   SUM(l.action = 'death')        AS deaths,
+                   SUM(l.action = 'ground_kill')  AS ground,
+                   GROUP_CONCAT(DISTINCT CASE WHEN l.action = 'sortie_start'
+                                              THEN l.plane END) AS planes
+            FROM participants p
+            LEFT JOIN log_entries l
+                   ON l.event_id = p.event_id AND l.side = p.side AND l.pilot = p.pilot
+            LEFT JOIN side_roles r ON r.event_id = p.event_id AND r.side = p.side
+            WHERE p.event_id = ?
+            GROUP BY p.side, p.pilot
+            ORDER BY kills DESC, p.pilot COLLATE NOCASE""", (event_id,)).fetchall()
+
+        return {"header": header, "teams": teams, "pilots": pilots}
+
+    def get_squad_yearly(self, spellings: list[str]):
+        """(year, kills) for a squad's trend chart."""
+        if not spellings:
+            return []
+        marks = ",".join("?" * len(spellings))
+        return [
+            (r[0], r[1] or 0, r[2] or 0) for r in self._conn.execute(f"""
+                SELECT substr(e.event_date, 1, 4) AS yr,
+                       SUM(s.kills), COUNT(DISTINCT s.event_id)
+                FROM squad_stats s
+                JOIN events e ON e.event_id = s.event_id AND e.excluded = 0
+                WHERE s.squad IN ({marks})
+                GROUP BY yr ORDER BY yr""", spellings)
+        ]
+
+    def apply_side_roles(self, only_events=None) -> dict[str, int]:
+        """Infer each team's historical role from the aircraft it flew.
+
+        Cheap to re-run and safe to call after an update; pass
+        `only_events` to reclassify just the frames that changed.
+
+        Affinities are learned once from every trusted label rather than
+        leave-one-out per team. Leave-one-out is the honest way to
+        *measure* accuracy - it gave 97.9% - but for classifying the
+        real thing there's no reason to withhold evidence.
+        """
+        from collections import Counter
+
+        from fsostats import sides
+
+        affinities = sides.load_affinities(self._conn)
+        teams = self._conn.execute(
+            "SELECT DISTINCT event_id, side FROM log_entries "
+            "WHERE action = 'sortie_start'").fetchall()
+
+        planes_by_team: dict[tuple[int, str], Counter] = {}
+        for event_id, side, plane, n in self._conn.execute(
+                "SELECT event_id, side, plane, COUNT(*) FROM log_entries "
+                "WHERE action = 'sortie_start' AND plane IS NOT NULL "
+                "GROUP BY event_id, side, plane"):
+            if plane in sides.NOT_AIRCRAFT:
+                continue
+            planes_by_team.setdefault((event_id, side), Counter())[plane] = n
+
+        wanted = set(only_events) if only_events is not None else None
+        counts = {"allied": 0, "axis": 0, "unknown": 0}
+        rows = []
+        for team in teams:
+            key = (team["event_id"], team["side"])
+            if wanted is not None and key[0] not in wanted:
+                continue
+            role, confidence = sides.classify_team(
+                planes_by_team.get(key, Counter()), affinities)
+            counts[role] += 1
+            rows.append((key[0], key[1], role, confidence))
+
+        with self._conn:
+            self._conn.executemany(
+                "INSERT INTO side_roles (event_id, side, role, confidence) "
+                "VALUES (?,?,?,?) ON CONFLICT(event_id, side) DO UPDATE SET "
+                "role=excluded.role, confidence=excluded.confidence",
+                rows,
+            )
+        return counts
+
+    def get_side_role(self, event_id: int, side: str):
+        row = self._conn.execute(
+            "SELECT role, confidence FROM side_roles WHERE event_id=? AND side=?",
+            (event_id, side)).fetchone()
+        return (row["role"], row["confidence"]) if row else (None, 0.0)
 
     def get_campaign_summaries(self):
         """One row per campaign - the unit users think in alongside frames.

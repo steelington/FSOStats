@@ -154,9 +154,12 @@ def main():
     # New frames arrive untitled; this names them, and picks up any
     # correction added to campaigns.py since the last run.
     counts = db.apply_campaign_metadata()
-    print(f"Titles applied: {counts['named']} named from campaigns.py, "
-          f"{counts['ungrouped']} from their own title, "
-          f"{counts['excluded']} excluded.", flush=True)
+    print(f"Named and grouped: {counts['curated']} curated, "
+          f"{counts['clustered']} campaigns, {counts['excluded']} excluded, "
+          f"{counts['one_sided']} frames with only one side's log.", flush=True)
+    roles = db.apply_side_roles()
+    print(f"Side roles inferred: {roles['allied']} allied, {roles['axis']} axis, "
+          f"{roles['unknown']} unknown.", flush=True)
     db.close()
 
 
