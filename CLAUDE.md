@@ -46,6 +46,34 @@ porting.
     scrape_fso.py           resumable scrape; --workers N, --interval S
     tests/                  pytest; toy fixtures plus real-db invariants
 
+## Building the exe
+
+    python -m fsostats.prepare_db      # VACUUM, drop indexes, gzip
+    pyinstaller FSOStats.spec --clean  # -> dist/FSOStats.exe (47 MB)
+
+`prepare_db` drops every index before compressing: they are more than
+half the file (167 MB with, 78 MB without), and `FSODB`'s SCHEMA
+rebuilds them on first open in ~2.5s. That halves the shipped database,
+37.5 MB -> 18.6 MB, and guarantees it carries exactly the indexes
+SCHEMA declares rather than whatever a dev machine accumulated.
+
+**The onefile trap, and why it's handled the way it is.** A onefile exe
+extracts to a temp directory Windows wipes on every launch, so the
+bundled database is decompressed *once* into `%LOCALAPPDATA%\FSOStats`
+and only ever opened there - otherwise every Update would vanish on the
+next start. `paths.get_database_path()` seeds only when the target is
+missing, writing to a `.partial` name and renaming, so an interrupted
+first run can't leave a half-written file that later launches accept.
+
+**Never create a second `CTk()` root.** First-run unpacking shows a
+splash, and it must be a `CTkToplevel` of the main window. A second root
+puts the masthead image in the wrong interpreter and tkinter dies with
+`image "pyimage1" doesn't exist` - which only happens on first run, so
+it will not show up in ordinary testing.
+
+`fsostats/data/fsostats.db.gz` is a build artefact, gitignored. It
+travels as a release asset beside the exe.
+
 ## Recomputing derived data
 
 Three tables/columns are derived and must be refreshed after any scrape:

@@ -49,18 +49,39 @@ def get_app_data_dir() -> Path:
     return PACKAGE_DIR.parent
 
 
-def get_database_path() -> Path:
+def get_database_path(progress=None) -> Path:
     """The database the app should open - always the writable copy.
 
-    Seeds from the bundled read-only copy on first run. Seeding only when
-    the target is missing is the whole point: re-copying on every launch
-    would throw away whatever the user's Update button had fetched.
+    On first run the bundled gzipped database is decompressed into the
+    per-user directory. **Seeding only when the target is missing is the
+    whole point**: a onefile exe extracts to a temp directory that is
+    wiped on every launch, so a database opened at the bundled path
+    would lose everything the Update button had fetched. Re-seeding on
+    every launch would do the same damage more slowly.
+
+    `progress` is called with a short status string, since decompressing
+    ~167 MB takes a couple of seconds and the window isn't up yet.
     """
     target = get_app_data_dir() / DB_FILENAME
-    if not target.exists():
-        bundled = resource_path(DB_FILENAME)
-        if bundled.exists() and bundled != target:
-            import shutil
+    if target.exists():
+        return target
 
-            shutil.copy2(bundled, target)
+    bundled = resource_path("data", DB_FILENAME + ".gz")
+    if not bundled.exists():
+        # Running from source without a prepared archive: the working
+        # database next to the code is the one to use.
+        return target
+
+    import gzip
+    import shutil
+
+    if progress:
+        progress("First run: unpacking the FSO database, this happens once...")
+    # Written to a temporary name and renamed, so an interrupted first
+    # run can't leave a half-written database that later launches would
+    # accept as already seeded.
+    partial = target.with_suffix(".partial")
+    with gzip.open(bundled, "rb") as source, open(partial, "wb") as out:
+        shutil.copyfileobj(source, out, length=4 * 1024 * 1024)
+    partial.replace(target)
     return target

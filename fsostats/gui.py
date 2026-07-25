@@ -180,7 +180,12 @@ class App(ctk.CTk):
             self.iconbitmap(str(theme.APP_ICON_ICO_PATH))
         theme.style_treeview()
 
-        self.db = FSODB(get_database_path())
+        # First run unpacks the shipped database and rebuilds its
+        # indexes - about five seconds with nothing yet on screen. The
+        # splash must be a Toplevel of this window, not a second CTk():
+        # two roots put the masthead image in the wrong interpreter and
+        # tkinter fails with 'image "pyimage1" doesn't exist'.
+        self.db = FSODB(self._seed_database())
         self._logo_image = None  # a CTkImage must outlive the widget
         self._updater: Updater | None = None
         self._update_added = 0
@@ -330,6 +335,38 @@ class App(ctk.CTk):
             "Placings": "Times appearing on a frame's list at all.",
             "Best": "Best single-frame figure the site recorded.",
         })
+
+    def _seed_database(self):
+        """Open the writable database, unpacking the shipped copy first
+        if this is the first run. Returns the path to open."""
+        from fsostats.paths import DB_FILENAME, get_app_data_dir
+
+        if (get_app_data_dir() / DB_FILENAME).exists():
+            return get_database_path()
+
+        self.withdraw()                 # don't show a half-built window
+        splash = ctk.CTkToplevel(self)
+        splash.title("FSO Stats")
+        splash.geometry("430x120")
+        splash.resizable(False, False)
+        splash.configure(fg_color=theme.BG_DARK)
+        label = ctk.CTkLabel(
+            splash, text="Starting...", text_color=theme.TEXT_BODY,
+            font=ctk.CTkFont(size=13), wraplength=390)
+        label.pack(expand=True, padx=16, pady=16)
+        splash.update()
+
+        def progress(message):
+            label.configure(text=message)
+            splash.update()
+
+        try:
+            path = get_database_path(progress=progress)
+            progress("Building indexes, nearly there...")
+            return path
+        finally:
+            splash.destroy()
+            self.deiconify()
 
     def destroy(self):
         if self._updater is not None:

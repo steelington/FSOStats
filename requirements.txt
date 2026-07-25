@@ -1,0 +1,10 @@
+# Runtime
+customtkinter>=5.2.2      # the GUI toolkit
+pillow>=10.0              # icons and the masthead badge
+requests>=2.31            # the ahevents.net client
+beautifulsoup4>=4.12      # parsing the event-log pages
+
+# Build and test
+pyinstaller>=6.0          # packaging the exe
+pytest>=8.0               # the test suite
+numpy>=1.26               # only fsostats/icons.py, which rebuilds the assets
