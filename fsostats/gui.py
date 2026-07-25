@@ -14,7 +14,8 @@ import tkinter as tk
 
 import customtkinter as ctk
 
-from fsostats import headtohead, theme
+from fsostats import headtohead, pilot, theme
+from fsostats.chart import TrendChart
 from fsostats.db import FSODB
 from fsostats.grid import GridView
 from fsostats.paths import get_database_path
@@ -292,10 +293,10 @@ class App(ctk.CTk):
         )
         self.frame_totals.pack(anchor="w", padx=10, pady=(0, 8))
 
+        self._build_pilot(self.tabs.tab("Pilot"))
         self._build_head_to_head(self.tabs.tab("Head-to-Head"))
 
         for name, note in (
-            ("Pilot", "Career totals, aircraft flown, and the frames this pilot appeared in."),
             ("Squad", "Squad rosters and performance over time, from squad_stats."),
             ("Leaderboards", "All-time boards aggregated from top_entries."),
         ):
@@ -309,6 +310,108 @@ class App(ctk.CTk):
                 holder, text=note, text_color=theme.TEXT_BODY,
                 font=ctk.CTkFont(size=12), justify="center",
             ).pack()
+
+    # ---------------- pilot ----------------
+
+    def _build_pilot(self, tab):
+        self.pilot_summary = ctk.CTkLabel(
+            tab, text="Choose a pilot above.", text_color=theme.TEXT_BODY,
+            font=ctk.CTkFont(size=13, weight="bold"), justify="left",
+        )
+        self.pilot_summary.pack(anchor="w", padx=10, pady=(8, 2))
+
+        self.pilot_outcomes = ctk.CTkLabel(
+            tab, text="", text_color=theme.TEXT_BODY,
+            font=ctk.CTkFont(size=12), justify="left",
+        )
+        self.pilot_outcomes.pack(anchor="w", padx=10, pady=(0, 6))
+
+        self.pilot_chart = TrendChart(tab, height=150)
+        self.pilot_chart.pack(fill="x", padx=10, pady=(0, 6))
+
+        split = ctk.CTkFrame(tab, fg_color="transparent")
+        split.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+        split.grid_columnconfigure(0, weight=3)
+        split.grid_columnconfigure(1, weight=5)
+        split.grid_rowconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            split, text="Aircraft flown", text_color=theme.TEXT_HEADING,
+            font=ctk.CTkFont(size=12, weight="bold"),
+        ).grid(row=0, column=0, sticky="w", padx=4, pady=(0, 2))
+        ctk.CTkLabel(
+            split, text="Frames", text_color=theme.TEXT_HEADING,
+            font=ctk.CTkFont(size=12, weight="bold"),
+        ).grid(row=0, column=1, sticky="w", padx=4, pady=(0, 2))
+
+        self.pilot_aircraft = GridView(
+            split, columns=("Aircraft", "Sorties", "Kills", "Deaths", "K/D", "Ground"),
+            wide=("Aircraft",), height=12,
+        )
+        for name, width in (
+            ("Aircraft", 170), ("Sorties", 70), ("Kills", 60),
+            ("Deaths", 65), ("K/D", 60), ("Ground", 65),
+        ):
+            self.pilot_aircraft.tree.column(name, width=width, minwidth=45)
+        self.pilot_aircraft.container.grid(row=1, column=0, sticky="nsew", padx=4)
+
+        self.pilot_frames = GridView(
+            split,
+            columns=("Date", "Frame", "Side", "Squad", "Aircraft", "Sorties", "Kills", "Deaths"),
+            wide=("Frame", "Aircraft", "Squad"), height=12,
+        )
+        for name, width in (
+            ("Date", 90), ("Frame", 240), ("Side", 90), ("Squad", 90),
+            ("Aircraft", 170), ("Sorties", 65), ("Kills", 55), ("Deaths", 60),
+        ):
+            self.pilot_frames.tree.column(name, width=width, minwidth=45)
+        self.pilot_frames.container.grid(row=1, column=1, sticky="nsew", padx=4)
+
+    def _load_pilot(self, name):
+        career = pilot.career(self.db, name)
+        if not career["frames"]:
+            self.pilot_summary.configure(text=f"{name}: no frames on record.")
+            self.pilot_outcomes.configure(text="")
+            self.pilot_aircraft.set_rows([])
+            self.pilot_frames.set_rows([])
+            self.pilot_chart.plot([], message="No data.")
+            return
+
+        self.pilot_summary.configure(text=(
+            f"{name}   |   {career['frames']} frames, {career['first_frame']} to "
+            f"{career['last_frame']}   |   {career['sorties']:,} sorties   |   "
+            f"{career['kills']:,} kills, {career['deaths']:,} deaths "
+            f"(K/D {career['kd']:.2f})   |   {career['ground_kills']:,} ground kills"
+            f"   |   {career['aircraft_types']} aircraft types"
+        ))
+        # captured/crashed/exploded are how a death ended, so they are a
+        # breakdown of the deaths above rather than extra losses.
+        self.pilot_outcomes.configure(text=(
+            f"Sortie outcomes: {career['landed']:,} landed, {career['bailed']:,} bailed, "
+            f"{career['ditched']:,} ditched      "
+            f"Deaths by type: {career['crashed']:,} crashed, {career['exploded']:,} exploded, "
+            f"{career['captured']:,} captured, "
+            f"{career['deaths'] - career['crashed'] - career['exploded'] - career['captured']:,} "
+            f"shot down (no detail)"
+        ))
+
+        self.pilot_aircraft.set_rows([
+            (a["plane"], a["sorties"], a["kills"], a["deaths"],
+             f"{a['kd']:.2f}", a["ground_kills"])
+            for a in pilot.aircraft(self.db, name)
+        ])
+        self.pilot_frames.set_rows([
+            (f["date"], f["frame"], f["side"], f["squad"], f["planes"],
+             f["sorties"], f["kills"], f["deaths"])
+            for f in pilot.frames(self.db, name)
+        ])
+
+        years = pilot.yearly(self.db, name)
+        self.pilot_chart.plot(
+            [(int(y), kills) for y, _frames, _sorties, kills in years],
+            title=f"{name} - kills per year", ylabel="kills", xlabel="Year",
+            message="No data.",
+        )
 
     # ---------------- head to head ----------------
 
@@ -363,7 +466,10 @@ class App(ctk.CTk):
 
     def _load_head_to_head(self, pilot):
         self._h2h_pilot = pilot
-        summary = headtohead.summary(self.db, pilot)
+        # One pass: the opponent list feeds both the summary line and the
+        # table, and computing it twice doubles the slowest query here.
+        all_opponents = headtohead.opponents(self.db, pilot)
+        summary = headtohead.summary(self.db, pilot, all_opponents)
         if not summary["opponents"]:
             self.h2h_summary.configure(
                 text=f"{pilot}: no recorded engagements against a named pilot."
@@ -384,7 +490,7 @@ class App(ctk.CTk):
         )
         self.h2h_grid.set_rows([
             (o.name, o.killed, o.killed_by, f"{o.diff:+d}", o.ratio, o.frames)
-            for o in headtohead.opponents(self.db, pilot)
+            for o in all_opponents
         ])
         self.h2h_detail.set_rows([])
         self.h2h_detail_label.configure(text="Engagements - select an opponent")
@@ -458,11 +564,12 @@ class App(ctk.CTk):
         if name.casefold() not in folded:
             self.status.configure(text=f"{name}: no such pilot in the logs.")
             return
-        self.status.configure(text=f"{name}: loading head-to-head...")
+        self.status.configure(text=f"{name}: loading...")
         self.update_idletasks()
+        self._load_pilot(name)
         self._load_head_to_head(name)
-        self.tabs.set("Head-to-Head")
-        self.status.configure(text=f"{name}: head-to-head loaded.")
+        self.tabs.set("Pilot")
+        self.status.configure(text=f"{name}: loaded.")
 
 
 def main() -> None:

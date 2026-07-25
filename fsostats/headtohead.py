@@ -219,9 +219,15 @@ def record_against(db, pilot: str, opponent: str) -> list[dict]:
     ]
 
 
-def summary(db, pilot: str) -> dict:
-    """Headline head-to-head figures for one pilot."""
-    all_opponents = opponents(db, pilot)
+def summary(db, pilot: str, all_opponents: list[Opponent] | None = None) -> dict:
+    """Headline head-to-head figures for one pilot.
+
+    Pass an already-computed opponent list to avoid recomputing it - the
+    shared-frame count behind it is the expensive part, and a caller
+    showing both the summary and the table would otherwise pay twice.
+    """
+    if all_opponents is None:
+        all_opponents = opponents(db, pilot)
     killed = sum(o.killed for o in all_opponents)
     killed_by = sum(o.killed_by for o in all_opponents)
     return {
