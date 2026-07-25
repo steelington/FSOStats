@@ -74,6 +74,12 @@ it will not show up in ordinary testing.
 `fsostats/data/fsostats.db.gz` is a build artefact, gitignored. It
 travels as a release asset beside the exe.
 
+**A fresh clone has no database and no way to get one quickly** - it has
+to scrape ~660 pages, which takes 30-60 minutes at the rate limit the
+client deliberately keeps. The app starts anyway and says so rather than
+showing empty grids; see `_show_empty_database_notice`. Point anyone who
+only wants to *use* it at the exe.
+
 ## Recomputing derived data
 
 Three tables/columns are derived and must be refreshed after any scrape:

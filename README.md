@@ -33,33 +33,59 @@ see the caveats below.
 
 ## Running it
 
-Download `FSOStats.exe` from the releases page. It ships with every FSO
-already scraped; the first launch unpacks the database into
-`%LOCALAPPDATA%\FSOStats` and takes a few seconds. **Update** fetches
-whatever has been posted since.
+**Use the exe.** Download `FSOStats.exe` from the releases page — it
+ships with all 583 frames already scraped. The first launch unpacks the
+database into `%LOCALAPPDATA%\FSOStats` and takes about five seconds;
+after that it opens straight away. **Update** fetches whatever has been
+posted since.
 
-From source:
+That really is the recommended route, and the next section explains
+why.
+
+## Running from source
+
+> **The database is not in this repository**, and there is no quick way
+> to get one. A fresh clone starts with nothing and has to scrape all
+> ~660 event pages from ahevents.net. The client waits 3 seconds
+> between requests per worker and runs 3 workers, and the site itself
+> takes about nine seconds to answer, so **expect somewhere between
+> half an hour and an hour** before you can use the app. It is a small
+> community site; please don't speed it up.
+>
+> If you only want to *use* FSO Stats, download the exe instead. Source
+> is for hacking on it.
 
 ```
 pip install -r requirements.txt
+python scrape_fso.py --all        # ~30-60 minutes, once
 python app.py
 ```
 
-## Building
+`scrape_fso.py` is resumable, so an interrupted run picks up where it
+stopped — nothing already fetched is requested twice. Without `--all`
+it only looks for frames newer than `SCRAPE_SINCE`, which is what the
+Update button does; a fresh clone needs `--all` to get the history.
+
+The app will start without a database, but every view will be empty and
+it will tell you so.
+
+## Building the exe
+
+Needs a populated `fsostats.db` first — see above.
 
 ```
 python -m fsostats.prepare_db      # VACUUM, drop indexes, gzip
-pyinstaller FSOStats.spec --clean
+pyinstaller FSOStats.spec --clean  # -> dist/FSOStats.exe
 ```
 
 `prepare_db` drops the indexes before compressing — they're more than
 half the file, and the app rebuilds them on first open in about two
 seconds. That takes the shipped database from 37 MB to 18.6 MB.
 
-The prepared `fsostats/data/fsostats.db.gz` is a build artefact and
-isn't in the repository; it belongs with the exe as a release asset.
-Without it, `scrape_fso.py` rebuilds the database from scratch — which
-is a long, polite crawl against a small community site.
+The prepared `fsostats/data/fsostats.db.gz` is a build artefact and is
+deliberately **not** committed: it would add another 18 MB to the
+repository's history on every rebuild, and it can always be regenerated.
+It belongs with the exe as a release asset.
 
 ## Things the data does, that you'd want to know
 

@@ -189,6 +189,7 @@ class App(ctk.CTk):
         self._logo_image = None  # a CTkImage must outlive the widget
         self._updater: Updater | None = None
         self._update_added = 0
+        self._empty_notice = None
         # Tracked so destroy() can cancel it - a pending 'after' firing
         # into a torn-down interpreter raises "invalid command name".
         self._update_after_id: str | None = None
@@ -1159,6 +1160,12 @@ class App(ctk.CTk):
 
         self._scope_unit = "frames"
         rows = self.db.get_frame_summaries()
+        if not rows:
+            # A source checkout starts with no database at all. Saying
+            # so beats showing six empty grids and letting the user
+            # guess whether it's broken.
+            self._show_empty_database_notice()
+            return
         self.frame_grid.set_columns(
             ("ID", "Date", "Frame", "Campaign", "No", "Sides", "Pilots", "Sorties", "Kills"),
             wide=("Frame", "Campaign"))
@@ -1182,6 +1189,31 @@ class App(ctk.CTk):
             text=f"{len(rows)} frames, {span}. {len(self.pilot_entry._values):,} pilots. "
                  f"{half} frames have only one side's log."
         )
+
+    def _show_empty_database_notice(self):
+        """No frames at all - almost certainly a source checkout that
+        hasn't been scraped yet."""
+        self.frame_grid.set_rows([])
+        self.frame_totals.configure(text="")
+        self.status.configure(
+            text=f"No frames in {self.db.path.name}. Run  python scrape_fso.py --all  "
+                 f"to fetch them (30-60 minutes), or use the packaged exe, "
+                 f"which ships with the database included.")
+        if getattr(self, "_empty_notice", None) is not None:
+            return
+        self._empty_notice = ctk.CTkLabel(
+            self.tabs.tab("Frames"),
+            text=("This database is empty.\n\n"
+                  "The scraped data isn't kept in the repository, so a fresh\n"
+                  "checkout has to fetch it from ahevents.net:\n\n"
+                  "    python scrape_fso.py --all\n\n"
+                  "That takes roughly half an hour to an hour - the site is small\n"
+                  "and the client deliberately goes easy on it. The scrape is\n"
+                  "resumable, so stopping and restarting is fine.\n\n"
+                  "If you just want to use FSO Stats, the packaged exe ships\n"
+                  "with every frame already in it."),
+            text_color=theme.TEXT_BODY, font=ctk.CTkFont(size=13), justify="left")
+        self._empty_notice.place(relx=0.5, rely=0.45, anchor="center")
 
     def _on_grid_change(self, rows):
         if getattr(self, "_scope_unit", "frames") == "campaigns":
