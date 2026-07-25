@@ -157,7 +157,10 @@ OVERRIDES: dict[int, tuple[str, int | None, str]] = {
     4228: ("Mountbatten Melee 42", 1, "frame 3 (4232) is numbered"),
     4230: ("Mountbatten Melee 42", 2, ""),
 
-    # --- renamed mid-campaign; see UNCERTAIN below ---
+    # --- renamed mid-campaign (confirmed by the user, 25 Jul 2026) ---
+    # Frames 2-3 are titled "Bougainville 43"; the campaign name is the
+    # one frame 1 carries. Not to be confused with the unrelated 2021
+    # Cherryblossom campaign, which also fought over Bougainville.
     4140: ("Thunder over the Solomons", 1, "campaign renamed after frame 1"),
     4142: ("Thunder over the Solomons", 2, "titled 'Bougainville 43'"),
     4145: ("Thunder over the Solomons", 3, "titled 'Bougainville 43'"),
@@ -181,19 +184,11 @@ EXCLUDED: dict[int, str] = {
 # Judgement calls worth revisiting against the event write-ups on
 # ahevents.net, recorded rather than buried:
 #
-#   4140/4142/4145 - "Thunder over the Solomons" (10 Jan 2025) then
-#   "Bougainville 43" on the next two Fridays. Bougainville is in the
-#   Solomons and the three sit on consecutive Fridays with no other
-#   candidates either side, so they are treated as one renamed campaign.
-#   The alternative reading is a one-off followed by a two-frame
-#   campaign. Note "Bougainville 43" also names the unrelated 2021
-#   Cherryblossom campaign, four years earlier.
-#
 #   2168/2169 - "North Sea Raiders", both on 30 Mar 2012 with identical
 #   log counts. Treated as one standalone frame plus a duplicate rather
 #   than two frames of a campaign: the Fridays either side belong to
 #   other campaigns that are already complete.
-UNCERTAIN = (4140, 4142, 4145, 2168, 2169)
+UNCERTAIN = (2168, 2169)
 
 
 def resolve(event_id: int, title: str) -> tuple[str | None, int | None, bool]:
