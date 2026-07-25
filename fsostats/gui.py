@@ -10,15 +10,21 @@ the next pieces; Head-to-Head is the one nothing else can do, since
 """
 from __future__ import annotations
 
+import queue
 import tkinter as tk
 
 import customtkinter as ctk
 
-from fsostats import headtohead, leaderboard, pilot, squads, theme
+from fsostats import headtohead, leaderboard, pilot, squads, theme, tooltip
 from fsostats.chart import TrendChart
 from fsostats.db import FSODB
 from fsostats.grid import GridView
 from fsostats.paths import get_database_path
+from fsostats.update import Updater
+
+# Everything up to this date is scraped, hand-checked and titled, and
+# ships in the database. Kept in step with scrape_fso.SCRAPE_SINCE.
+SCRAPE_SINCE = "2026-07-24"
 
 __version__ = "0.1.0"
 
@@ -176,16 +182,149 @@ class App(ctk.CTk):
 
         self.db = FSODB(get_database_path())
         self._logo_image = None  # a CTkImage must outlive the widget
+        self._updater: Updater | None = None
+        self._update_added = 0
+        # Tracked so destroy() can cancel it - a pending 'after' firing
+        # into a torn-down interpreter raises "invalid command name".
+        self._update_after_id: str | None = None
 
         self._build_masthead()
         self._build_top_bar()
         self._build_tabs()
         self._build_status_bar()
+        self._attach_tooltips()
         self._load_frames()
         self._load_squads()
         self._load_board()
 
+    # ---------------- tooltips ----------------
+
+    # The awkward truths about this data, put where they'll be read.
+    KILL_HELP = ("Air kills, counted from the log. A kill entry names the "
+                 "victim's aircraft, not the killer's - the aircraft column "
+                 "resolves what the pilot was flying from their sortie.")
+    ONE_SIDED_HELP = ("47 frames hold only one team's log; the other was never "
+                      "posted and never turned up later. Pilots on the missing "
+                      "side get no credit for a frame they flew, and side-vs-side "
+                      "comparison in those frames is half-blind.")
+
+    def _attach_tooltips(self):
+        tooltip.attach(self.pilot_entry.entry, (
+            "Type a handle to see a pilot's career and their record against "
+            "every opponent.\n\nMatching ignores case, and the list is the "
+            "4,318 pilots who actually appear in the logs, so a typo can't "
+            "silently return nothing."))
+        tooltip.attach(self.scope, (
+            "One row of the site's data is one FRAME. An FSO campaign is "
+            "normally three frames on consecutive Fridays, and people think "
+            "in both units.\n\n583 frames group into 201 campaigns."))
+        tooltip.attach(self.quick_filter,
+                       "Filter the list below across every column at once.")
+        tooltip.attach(self.update_btn, (
+            "Fetch frames posted since the database was built.\n\nDiffs the "
+            "site's event list and fetches only what's new - usually one "
+            "frame, on a Friday. Runs in the background at three requests "
+            "every three seconds; ahevents.net is a small community site."))
+        tooltip.attach(self.stop_btn,
+                       "Stop after the fetch in flight. Frames already saved are kept.")
+
+        self.frame_grid.set_column_help({
+            "Frame": "The frame's name, corrected where the posted title was "
+                     "wrong, missing its number, or renamed mid-campaign. "
+                     "Sort by ID to see the original order.",
+            "Campaign": "Which FSO this frame belongs to. Grouped by title and "
+                        "date; names that recur in different years carry the year.",
+            "No": "Which frame of its campaign, 1-3. Read from the title where "
+                  "it says, hand-checked for the 50 that don't.",
+            "Sides": self.ONE_SIDED_HELP,
+            "Half-logged": self.ONE_SIDED_HELP,
+            "Pilots": "Pilot slots recorded for this frame, both teams.",
+            "Sorties": "Take-offs, counted from sortie_start entries.",
+            "Kills": self.KILL_HELP,
+            "Frames": "Frames in this campaign. Usually three; fewer when a "
+                      "frame's log was never rendered by the site.",
+        })
+
+        self.pilot_aircraft.set_column_help({
+            "Aircraft": "What the pilot was flying, resolved by matching each "
+                        "entry to the sortie it fell within.\n\n'(no sortie "
+                        "recorded)' is about 4% of frames, where the log starts "
+                        "without a take-off - those kills can't be pinned to a type.",
+            "Kills": "Air kills scored while flying this type.",
+            "Deaths": "Times shot down flying this type.",
+            "K/D": "Kills divided by deaths in this aircraft.",
+            "Ground": "Ground targets destroyed flying this type.",
+        })
+        self.pilot_frames.set_column_help({
+            "Side": "The side label the event page carried. These are "
+                    "unreliable - themed names, occasional duplicates, and a "
+                    "few frames with the labels swapped outright - so treat it "
+                    "as recorded, not as meaning Allied or Axis.",
+            "Squad": "The squad this pilot flew with in this frame.",
+            "Aircraft": "Every type the pilot took off in during this frame.",
+        })
+        self.h2h_grid.set_column_help({
+            "Opponent": "Every pilot this one traded shootdowns with.",
+            "Killed": "Times this pilot shot the opponent down.",
+            "Killed by": "Times the opponent shot this pilot down.",
+            "Diff": "Killed minus killed by.",
+            "Ratio": "Killed divided by killed by.",
+            "Frames": "Frames both pilots flew in - context for the record. "
+                      "3-1 reads very differently over four meetings than forty.",
+        })
+        self.h2h_detail.set_column_help({
+            "Result": "Which way the shootdown went.",
+            "Aircraft lost": "The aircraft that was shot down - the opponent's "
+                             "on a kill, this pilot's on a death. Blank where "
+                             "only the losing side's log recorded it.",
+        })
+        self.squad_grid.set_column_help({
+            "Squad": "Squad names are typed fresh each frame, so spellings "
+                     "differing only by spacing, decoration, punctuation or "
+                     "case are folded together. Similar-looking names are not: "
+                     "II./JG11 and III./JG11 Black Hearts are different units.",
+            "Frames": "Distinct frames flown. A squad occasionally fields teams "
+                      "on both sides of one frame, which counts once here.",
+            "Kills": "Air kills by the whole squad, from the totals the site "
+                     "posts per frame. Spot-checked against the logs and they "
+                     "agree exactly.",
+            "Deaths": "Times squad pilots were shot down.",
+            "K/D": "Squad kills divided by squad deaths, all frames.",
+            "Ground": "Ground targets destroyed.",
+            "First": "First frame this squad appears in.",
+            "Last": "Most recent frame this squad appears in.",
+        })
+        self.squad_detail.set_column_help({
+            "Side": "The side label as the event page carried it - see the "
+                    "pilot view for why these can't be trusted.",
+            "Pilots": "Pilots this squad fielded in this frame.",
+        })
+        self.board_totals.set_column_help({
+            "Total": "Counted from the logs, not from the site's top lists - "
+                     "those run only seven deep for pilots and three for "
+                     "squads, so summing them would total the podium rather "
+                     "than the career.",
+            "Frames": "Frames flown, including those with nothing scored, so "
+                      "the per-frame average isn't flattered.",
+            "Per frame": "Total divided by frames flown.",
+        })
+        self.board_podium.set_column_help({
+            "Wins": "Times this name topped its side's board for the frame. "
+                    "Rank is per side, so every frame has two winners.",
+            "Top 3": "Times placed in its side's top three.",
+            "Placings": "Times appearing on a frame's list at all.",
+            "Best": "Best single-frame figure the site recorded.",
+        })
+
     def destroy(self):
+        if self._updater is not None:
+            self._updater.stop()
+        if self._update_after_id is not None:
+            try:
+                self.after_cancel(self._update_after_id)
+            except Exception:      # already fired, or interpreter going away
+                pass
+            self._update_after_id = None
         try:
             self.db.close()
         except Exception:
@@ -673,10 +812,94 @@ class App(ctk.CTk):
         )
         self.status.pack(side="left", padx=10, pady=6)
 
-        # Wired up once the scrape runs on a background thread with
-        # progress, as AHSTATS does for its sync.
-        update = ctk.CTkButton(bar, text="Update", width=90, state="disabled")
-        update.pack(side="right", padx=10, pady=4)
+        self.update_btn = ctk.CTkButton(
+            bar, text="Update", width=90, command=self._start_update)
+        self.update_btn.pack(side="right", padx=10, pady=4)
+        self.stop_btn = ctk.CTkButton(
+            bar, text="Stop", width=70, command=self._stop_update, state="disabled",
+            fg_color=theme.PANEL_BG_ALT, hover_color=theme.ACCENT_RED)
+        self.stop_btn.pack(side="right", padx=(0, 4), pady=4)
+        self.progress = ctk.CTkProgressBar(bar, width=200)
+        self.progress.set(0)
+        self.progress.pack(side="right", padx=10, pady=4)
+        self.progress.pack_forget()      # only while an update runs
+
+    # ---------------- update ----------------
+
+    def _start_update(self):
+        if self._updater is not None and self._updater.running:
+            return
+        self._updater = Updater(
+            since=SCRAPE_SINCE, known_event_ids=self.db.get_fetched_event_ids())
+        self._update_added = 0
+        self.update_btn.configure(state="disabled", text="Updating")
+        self.stop_btn.configure(state="normal")
+        self.progress.pack(side="right", padx=10, pady=4)
+        self.progress.set(0)
+        self.status.configure(text="Contacting ahevents.net...")
+        self._updater.start()
+        self._poll_update()
+
+    def _stop_update(self):
+        if self._updater is not None:
+            self._updater.stop()
+            self.status.configure(text="Stopping after the current fetch...")
+
+    def _poll_update(self):
+        """Drain the worker's queue on the UI thread.
+
+        Every database write happens here, never on the worker: FSODB
+        holds one sqlite connection and isn't thread-safe.
+        """
+        finished = False
+        while True:
+            try:
+                message = self._updater.messages.get_nowait()
+            except queue.Empty:
+                break
+
+            if message.kind == "event":
+                try:
+                    self.db.save_event(message.event)
+                    self._update_added += 1
+                except Exception as error:   # noqa: BLE001 - one bad frame must not stop the run
+                    self.status.configure(
+                        text=f"Save failed: {type(error).__name__}: {error}")
+                else:
+                    self.status.configure(text=message.text)
+            elif message.kind == "error":
+                self.status.configure(text=f"Update failed - {message.text.splitlines()[0]}")
+                finished = True
+            elif message.kind == "done":
+                self.status.configure(text=message.text)
+                finished = True
+            else:
+                self.status.configure(text=message.text)
+
+            if message.fraction:
+                self.progress.set(message.fraction)
+
+        if finished or not self._updater.running:
+            self._finish_update()
+            return
+        self._update_after_id = self.after(200, self._poll_update)
+
+    def _finish_update(self):
+        self._update_after_id = None
+        self.update_btn.configure(state="normal", text="Update")
+        self.stop_btn.configure(state="disabled")
+        self.progress.pack_forget()
+
+        if self._update_added:
+            # New frames arrive untitled and ungrouped; this names them
+            # and re-runs the campaign clustering over the whole set.
+            self.db.apply_campaign_metadata()
+            self.pilot_entry.set_values(self.db.get_pilot_names())
+            self._load_frames()
+            self._load_squads()
+            self._load_board()
+            self.status.configure(
+                text=f"Added {self._update_added} frame(s). Lists refreshed.")
 
     # ---------------- data ----------------
 

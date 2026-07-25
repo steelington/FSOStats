@@ -17,7 +17,7 @@ from tkinter import ttk
 
 import customtkinter as ctk
 
-from fsostats import theme
+from fsostats import theme, tooltip
 
 
 def sort_key(value):
@@ -98,6 +98,14 @@ class GridView:
 
         theme.configure_zebra_tags(self.tree)
         self.tree.bind("<Button-3>", self._on_right_click)
+
+        # Column help, shown when the pointer rests on a heading. The
+        # tooltip text is resolved lazily so one Tooltip can serve every
+        # column - it asks which heading the pointer is over at the
+        # moment it fires.
+        self._column_help: dict[str, str] = {}
+        tooltip.attach(self.tree, self._help_under_pointer)
+
         if columns:
             self.set_columns(columns, wide=wide)
 
@@ -128,6 +136,32 @@ class GridView:
             if name in columns:
                 self.tree.column(name, anchor="w")
         self._refresh_headings()
+
+    # -- column help --------------------------------------------------
+
+    def set_column_help(self, help_by_column: dict) -> None:
+        """Hover text per column heading. Survives set_columns()."""
+        self._column_help = dict(help_by_column)
+
+    def _help_under_pointer(self) -> str:
+        """What the pointer is over, as tooltip text.
+
+        Returns the column's own help over a heading, and a hint about
+        sorting and filtering when the column has none, so the right
+        click menu is discoverable at all.
+        """
+        try:
+            x = self.tree.winfo_pointerx() - self.tree.winfo_rootx()
+            y = self.tree.winfo_pointery() - self.tree.winfo_rooty()
+            if self.tree.identify_region(x, y) != "heading":
+                return ""
+            index = int(self.tree.identify_column(x).lstrip("#")) - 1
+            name = self.columns[index]
+        except (ValueError, IndexError, Exception):
+            return ""
+        help_text = self._column_help.get(name)
+        footer = "Click to sort, right-click to filter."
+        return f"{name}\n\n{help_text}\n\n{footer}" if help_text else footer
 
     # -- data ---------------------------------------------------------
 
