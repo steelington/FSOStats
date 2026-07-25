@@ -174,6 +174,75 @@ TODO: 3,862 kill rows name a victim who isn't a participant of that
 event. Worth understanding before career totals are trusted - it may be
 case drift, or a side roster the page didn't list.
 
+## Squads and leaderboards (25 Jul 2026)
+
+`squad_stats` is posted per event/side/squad by the site and **agrees
+with the logs exactly** - on event 4295 the three biggest squads posted
+69/52/30 kills and the log holds 69/52/30. Squad totals are taken from
+it rather than recounted.
+
+### Squad names drift like frame titles
+
+248 raw names fold to 186. The key keeps only letters and digits, since
+case, spacing, decoration and punctuation all vary between frames and
+none of them distinguish one squad from another:
+
+    '325th  Checkertails VFG'  '325th Checkertails VFG'
+    'CLAIM JUMPERS'            'CLAIMJUMPERS'
+    '9 GIAP VVS RKKA'          '9GIAP VVS RKKA'
+    '~~~THE UNFORGIVEN~~~'     '~~~The Unforgiven~~~'
+
+All 42 merges were checked by hand. **Substring matching is not done
+and shouldn't be** - 'II./JG11' is inside 'III./JG11 Black Hearts' and
+those are different units. '364th C-Hawks' and '364th C-Hawks FG' stay
+apart for the same reason, though they may well be one outfit.
+
+**A parser artifact turned up here:** some names carry literal
+backslash-escapes from the source page - `162ndFG\\"Purple*Hearts\\"`
+alongside the clean `162ndFG"Purple*Hearts"`. Dropping punctuation
+absorbs it and the display name prefers the unescaped spelling, but the
+parser is storing the escape. Worth fixing there if the data is ever
+rebuilt; `SCRAPE_SINCE` means it won't be.
+
+### Squads appearing on both sides - what it really is
+
+A squad should never be on both sides of a frame. 118 cases look like
+it; almost none are:
+
+* **ZZZ_NO_SQUAD** - not a squad at all, but the site's bucket for
+  pilots without one. 217 frames, both sides at once, and its roster
+  includes a blank handle. Excluded from the squad list.
+* **The same team listed twice on the same side** under two spellings,
+  which is the backslash-escaping artifact above rather than two teams.
+  11 groups. The source is inconsistent about which copy carries the
+  roster and which the totals - event 3067's escaped `412th FNVG
+  \\"Volunteers\\"` row has 25 pilots and 15 kills with *no*
+  participants, while the clean row has the 25 participants and 0 kills.
+  Neither summing nor taking the maximum matches the roster in all 11,
+  so totals are summed and the pilot count is taken from `participants`,
+  which is authoritative.
+* **A genuine residue of 30 pilot-frames** (out of 108,094) where one
+  pilot is recorded on both teams, logs and all: SKfgALPO in event 4232
+  flew a Bf 110 for the Luftwaffe and also carries eight RAF entries.
+  Left as the source records them.
+
+Separately, `squad_stats` holds one row per side, so row count is not
+frame count - JG54 Grunherz has 519 team entries across 514 frames.
+Frames are counted as distinct event ids.
+
+### top_entries ranks per side, not per frame
+
+(event, side, category, rank) is unique, so **every frame has two
+rank-1 pilots**, one per team. Categories are pilot_kills, pilot_obj,
+squad_kills, squad_obj; the lists run 7 deep for pilots and 3 for
+squads.
+
+That depth means `top_entries` **cannot give all-time totals** - summing
+it totals the podium, not the career, and flatters a pilot who was often
+second over one who was steadily fourth. Totals are counted from
+`log_entries` instead; `top_entries` answers a different question, which
+is how often someone led at all.
+
 ## Database size (for shipping with the exe)
 
 Measured 25 Jul 2026, 586 events / 589,621 log entries:

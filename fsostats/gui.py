@@ -14,7 +14,7 @@ import tkinter as tk
 
 import customtkinter as ctk
 
-from fsostats import headtohead, pilot, theme
+from fsostats import headtohead, leaderboard, pilot, squads, theme
 from fsostats.chart import TrendChart
 from fsostats.db import FSODB
 from fsostats.grid import GridView
@@ -182,6 +182,8 @@ class App(ctk.CTk):
         self._build_tabs()
         self._build_status_bar()
         self._load_frames()
+        self._load_squads()
+        self._load_board()
 
     def destroy(self):
         try:
@@ -295,21 +297,8 @@ class App(ctk.CTk):
 
         self._build_pilot(self.tabs.tab("Pilot"))
         self._build_head_to_head(self.tabs.tab("Head-to-Head"))
-
-        for name, note in (
-            ("Squad", "Squad rosters and performance over time, from squad_stats."),
-            ("Leaderboards", "All-time boards aggregated from top_entries."),
-        ):
-            holder = ctk.CTkFrame(self.tabs.tab(name), fg_color="transparent")
-            holder.pack(expand=True)
-            ctk.CTkLabel(
-                holder, text=f"{name} - not built yet",
-                font=ctk.CTkFont(size=16, weight="bold"), text_color=theme.TEXT_HEADING,
-            ).pack(pady=(0, 6))
-            ctk.CTkLabel(
-                holder, text=note, text_color=theme.TEXT_BODY,
-                font=ctk.CTkFont(size=12), justify="center",
-            ).pack()
+        self._build_squad(self.tabs.tab("Squad"))
+        self._build_leaderboards(self.tabs.tab("Leaderboards"))
 
     # ---------------- pilot ----------------
 
@@ -507,6 +496,177 @@ class App(ctk.CTk):
         self.h2h_detail_label.configure(
             text=f"{self._h2h_pilot} vs {opponent} - {len(rows)} engagements"
         )
+
+    # ---------------- squad ----------------
+
+    def _build_squad(self, tab):
+        # wraplength or the sentence runs past both window edges.
+        self.squad_summary = ctk.CTkLabel(
+            tab, text="", text_color=theme.TEXT_BODY,
+            font=ctk.CTkFont(size=11), justify="left", wraplength=1180,
+        )
+        self.squad_summary.pack(anchor="w", padx=10, pady=(8, 4))
+
+        split = ctk.CTkFrame(tab, fg_color="transparent")
+        split.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+        split.grid_columnconfigure(0, weight=4)
+        split.grid_columnconfigure(1, weight=5)
+        split.grid_rowconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            split, text="Squads", text_color=theme.TEXT_HEADING,
+            font=ctk.CTkFont(size=12, weight="bold"),
+        ).grid(row=0, column=0, sticky="w", padx=4, pady=(0, 2))
+        self.squad_detail_label = ctk.CTkLabel(
+            split, text="Select a squad", text_color=theme.TEXT_HEADING,
+            font=ctk.CTkFont(size=12, weight="bold"), anchor="w",
+            wraplength=640, justify="left",
+        )
+        self.squad_detail_label.grid(row=0, column=1, sticky="w", padx=4, pady=(0, 2))
+
+        self.squad_grid = GridView(
+            split,
+            columns=("Squad", "Frames", "Kills", "Deaths", "K/D", "Ground", "First", "Last"),
+            wide=("Squad",), height=16,
+        )
+        for name, width in (
+            ("Squad", 220), ("Frames", 70), ("Kills", 65), ("Deaths", 70),
+            ("K/D", 60), ("Ground", 70), ("First", 90), ("Last", 90),
+        ):
+            self.squad_grid.tree.column(name, width=width, minwidth=45)
+        self.squad_grid.container.grid(row=1, column=0, sticky="nsew", padx=4)
+        self.squad_grid.tree.bind("<<TreeviewSelect>>", self._on_squad_selected)
+
+        self.squad_detail = GridView(
+            split, columns=("Date", "Frame", "Side", "Pilots", "Kills", "Deaths", "Ground"),
+            wide=("Frame",), height=16,
+        )
+        for name, width in (
+            ("Date", 90), ("Frame", 260), ("Side", 90),
+            ("Pilots", 60), ("Kills", 60), ("Deaths", 65), ("Ground", 65),
+        ):
+            self.squad_detail.tree.column(name, width=width, minwidth=45)
+        self.squad_detail.container.grid(row=1, column=1, sticky="nsew", padx=4)
+
+    def _load_squads(self):
+        self._squads = squads.all_squads(self.db)
+        merged = sum(1 for s in self._squads if s["spellings"] > 1)
+        self.squad_summary.configure(text=(
+            f"{len(self._squads)} squads. Names are typed fresh each frame, so spellings "
+            f"differing only by spacing, decoration, punctuation or case are folded together "
+            f"- {merged} squads here are a merge of several. Similar-looking names are NOT "
+            f"merged: II./JG11 and III./JG11 Black Hearts are different units. "
+            f"ZZZ_NO_SQUAD is excluded, being the site's bucket for pilots without a squad."
+        ))
+        self.squad_grid.set_rows([
+            (s["name"], s["frames"], s["kills"], s["deaths"], f"{s['kd']:.2f}",
+             s["obj"], s["first_seen"], s["last_seen"])
+            for s in self._squads
+        ])
+
+    def _on_squad_selected(self, _event):
+        selection = self.squad_grid.tree.selection()
+        if not selection:
+            return
+        name = self.squad_grid.tree.item(selection[0], "values")[0]
+        match = next((s for s in getattr(self, "_squads", []) if s["name"] == name), None)
+        if match is None:
+            return
+        spellings = squads.spellings_for(self.db, match["key"])
+        history = squads.history(self.db, spellings)
+        roster = squads.roster(self.db, spellings)
+        self.squad_detail.set_rows([
+            (h["date"], h["frame"], h["side"], h["pilots"], h["kills"],
+             h["deaths"], h["obj"])
+            for h in history
+        ])
+        top = ", ".join(f"{p['pilot']} ({p['frames']})" for p in roster[:3])
+        # history has one row per side, and a squad can field teams on
+        # both sides of a frame, so the row count is not the frame count.
+        entries = len(history)
+        frames_flown = match["frames"]
+        both = f" ({entries} team entries)" if entries != frames_flown else ""
+        self.squad_detail_label.configure(
+            text=f"{name} - {frames_flown} frames{both}, {len(roster)} pilots.  "
+                 f"Most frames: {top}"
+        )
+
+    # ---------------- leaderboards ----------------
+
+    LEADERBOARDS = {
+        "Pilot kills": ("pilot", "kills", "pilot_kills"),
+        "Pilot ground kills": ("pilot", "ground_kills", "pilot_obj"),
+        "Squad kills": ("squad", "kills", "squad_kills"),
+        "Squad ground kills": ("squad", "ground_kills", "squad_obj"),
+    }
+
+    def _build_leaderboards(self, tab):
+        bar = ctk.CTkFrame(tab, fg_color="transparent")
+        bar.pack(fill="x", padx=10, pady=(8, 4))
+        self.board_choice = ctk.CTkSegmentedButton(
+            bar, values=list(self.LEADERBOARDS), command=lambda _v: self._load_board()
+        )
+        self.board_choice.set("Pilot kills")
+        self.board_choice.pack(side="left")
+
+        ctk.CTkLabel(
+            tab,
+            text=("Totals are counted from the logs. Podium finishes come from the "
+                  "site's own per-frame top lists, which run seven deep for pilots and "
+                  "three for squads - so they can't give totals, only how often someone "
+                  "led. Rank is per side, so each frame has two winners, one per team."),
+            text_color=theme.TEXT_BODY, font=ctk.CTkFont(size=11), justify="left",
+            wraplength=1180,
+        ).pack(anchor="w", padx=10, pady=(0, 6))
+
+        split = ctk.CTkFrame(tab, fg_color="transparent")
+        split.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+        split.grid_columnconfigure(0, weight=1)
+        split.grid_columnconfigure(1, weight=1)
+        split.grid_rowconfigure(1, weight=1)
+
+        self.board_total_label = ctk.CTkLabel(
+            split, text="All-time totals", text_color=theme.TEXT_HEADING,
+            font=ctk.CTkFont(size=12, weight="bold"))
+        self.board_total_label.grid(row=0, column=0, sticky="w", padx=4, pady=(0, 2))
+        ctk.CTkLabel(
+            split, text="Podium finishes", text_color=theme.TEXT_HEADING,
+            font=ctk.CTkFont(size=12, weight="bold"),
+        ).grid(row=0, column=1, sticky="w", padx=4, pady=(0, 2))
+
+        self.board_totals = GridView(
+            split, columns=("#", "Name", "Total", "Frames", "Per frame"),
+            wide=("Name",), height=18)
+        for name, width in (("#", 50), ("Name", 210), ("Total", 80),
+                            ("Frames", 75), ("Per frame", 85)):
+            self.board_totals.tree.column(name, width=width, minwidth=40)
+        self.board_totals.container.grid(row=1, column=0, sticky="nsew", padx=4)
+
+        self.board_podium = GridView(
+            split, columns=("#", "Name", "Wins", "Top 3", "Placings", "Best"),
+            wide=("Name",), height=18)
+        for name, width in (("#", 50), ("Name", 200), ("Wins", 65),
+                            ("Top 3", 65), ("Placings", 80), ("Best", 60)):
+            self.board_podium.tree.column(name, width=width, minwidth=40)
+        self.board_podium.container.grid(row=1, column=1, sticky="nsew", padx=4)
+
+    def _load_board(self):
+        kind, metric, category = self.LEADERBOARDS[self.board_choice.get()]
+        if kind == "pilot":
+            rows = leaderboard.pilot_totals(self.db, metric)
+            totals = [(i, r["pilot"], r["total"], r["frames"], f"{r['per_frame']:.2f}")
+                      for i, r in enumerate(rows, 1)]
+        else:
+            rows = leaderboard.squad_totals(self.db, metric)
+            totals = [(i, r["squad"], r["total"], r["frames"], f"{r['per_frame']:.2f}")
+                      for i, r in enumerate(rows, 1)]
+        self.board_totals.set_rows(totals)
+        self.board_total_label.configure(
+            text=f"All-time totals - {self.board_choice.get().lower()}")
+        self.board_podium.set_rows([
+            (i, r["name"], r["wins"], r["top3"], r["placings"], r["best"])
+            for i, r in enumerate(leaderboard.podium(self.db, category), 1)
+        ])
 
     # ---------------- status bar ----------------
 
