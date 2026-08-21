@@ -101,10 +101,10 @@ class Tooltip:
 
         self._window = tk.Toplevel(self.widget)
         self._window.wm_overrideredirect(True)
-        self._window.configure(bg=theme.BORDER_GRAY)
+        self._window.configure(bg=theme.color(theme.BORDER_GRAY))
         label = tk.Label(
             self._window, text=text, justify="left",
-            bg=theme.PANEL_BG_ALT, fg=theme.TEXT_BODY,
+            bg=theme.color(theme.PANEL_BG_ALT), fg=theme.color(theme.TEXT_BODY),
             font=("Segoe UI", 9), wraplength=MAX_WIDTH,
             padx=8, pady=5, bd=0,
         )

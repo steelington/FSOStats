@@ -59,21 +59,39 @@ class TestColumnFilter:
         assert not flt.matches("15")
 
 
-@pytest.fixture
-def grid():
-    """A GridView needs a Tk root; skip where there's no display."""
+@pytest.fixture(scope="session")
+def tk_root():
+    """One Tk root for the whole session.
+
+    Building a fresh `CTk()` per test meant building a second root in the
+    same interpreter once the first was gone, and Tk is unenthusiastic
+    about that: it intermittently failed, and because the fixture treats
+    an unbuildable window as a skip, a run would quietly drop grid tests
+    instead of failing. Adding unrelated tests elsewhere was enough to
+    change the timing and make it happen. AHSTATS hit this first - see
+    its tests/gui_fixture.py - and the fix is the same: build one root,
+    hand it out, and let each test parent its own widgets to it.
+    """
     tk = pytest.importorskip("tkinter")
     ctk = pytest.importorskip("customtkinter")
-    from fsostats.grid import GridView
     try:
         root = ctk.CTk()
     except tk.TclError:
         pytest.skip("no display")
     root.withdraw()
-    view = GridView(root, columns=("Name", "Kills"), title="test")
+    yield root
+    root.destroy()
+
+
+@pytest.fixture
+def grid(tk_root):
+    """A GridView on the shared root, thrown away after each test."""
+    from fsostats.grid import GridView
+
+    view = GridView(tk_root, columns=("Name", "Kills"), title="test")
     view.set_rows([("AKWarHwk", 1364), ("Dantoo", 1011), ("Steely", 668)])
     yield view
-    root.destroy()
+    view.container.destroy()
 
 
 class TestGridView:

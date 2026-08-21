@@ -42,9 +42,54 @@ porting.
     fsostats/squads.py      squad totals and name folding
     fsostats/leaderboard.py all-time boards and podium finishes
     fsostats/update.py      the in-app Update job
+    fsostats/version_check.py  asks GitHub for a newer *app* release
+    fsostats/settings.py    tiny JSON store for UI preferences
     fsostats/gui.py         the app; grid/chart/theme/tooltip beside it
     scrape_fso.py           resumable scrape; --workers N, --interval S
     tests/                  pytest; toy fixtures plus real-db invariants
+
+## Light and dark (non-obvious)
+
+**Every colour in `theme.py` is a `(light, dark)` pair**, and every
+colour in `assets/fso_theme.json` is a two-element list. That is
+customtkinter's own convention: a CTk widget handed a two-tuple picks
+the right half for the current mode and re-picks it live when the mode
+changes, so the CTk half of the app follows the masthead's Dark/Light
+picker for free. A bare colour string is a bug - it shows the same
+shade in both modes.
+
+Nothing else follows automatically. `Canvas` (chart.py), the tooltip's
+`Label`, and every ttk style take one flat string, so they resolve pairs
+with `theme.color(...)` **at draw time** and re-draw on a switch:
+`theme.set_mode()` re-runs `style_treeview()` and calls back everything
+registered via `theme.on_mode_change()`, which `GridView` and
+`TrendChart` do in their constructors.
+
+The scrollbar styling covers `"TScrollbar"` as well as the
+Vertical/Horizontal names. A `ttk.Scrollbar` keeps the *bare class name*
+as its style whatever `-orient` says - only its layout is picked by
+orientation - so styling only the two orientated names configures
+nothing and leaves clam's light grey against a dark grid. AHSTATS hit
+this first and pins it in `tests/test_widgets.py`.
+
+The mode is remembered in `settings.py` and applied by
+`ctk.set_appearance_mode(settings.get("appearance_mode"))` at import
+time in gui.py, before any widget exists, so there is no dark flash on
+the way to light.
+
+## The update check
+
+`version_check.py` asks the GitHub releases API of `steelington/FSOStats`
+whether a newer **application** version exists - not to be confused with
+`update.py`, which fetches newly-posted **frames** from ahevents.net.
+One anonymous GET, no telemetry, nothing downloaded or installed; every
+failure resolves to "no update" in silence. It runs on a daemon thread
+at launch and, if something newer turns up, packs a badge into the
+masthead that opens the release page in the browser.
+
+`__version__` lives in `fsostats/__init__.py` (it used to be in gui.py,
+which the checker cannot import without a cycle). Bump it in the same
+commit that tags a release.
 
 ## Building the exe
 

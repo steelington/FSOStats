@@ -12,10 +12,12 @@ from __future__ import annotations
 
 import queue
 import tkinter as tk
+import webbrowser
 
 import customtkinter as ctk
 
-from fsostats import headtohead, leaderboard, pilot, squads, theme, tooltip
+from fsostats import (__version__, headtohead, leaderboard, pilot, settings, squads,
+                      theme, tooltip, version_check)
 from fsostats.chart import TrendChart
 from fsostats.db import FSODB
 from fsostats.grid import GridView
@@ -26,9 +28,9 @@ from fsostats.update import Updater
 # ships in the database. Kept in step with scrape_fso.SCRAPE_SINCE.
 SCRAPE_SINCE = "2026-07-24"
 
-__version__ = "0.1.0"
-
-ctk.set_appearance_mode("dark")
+# The saved preference decides the mode before a single widget is
+# built, so the app never flashes dark on its way to light.
+ctk.set_appearance_mode(settings.get("appearance_mode"))
 ctk.set_default_color_theme(str(theme.THEME_JSON_PATH))
 
 MAX_SUGGESTIONS = 12
@@ -202,6 +204,9 @@ class App(ctk.CTk):
         self._load_frames()
         self._load_squads()
         self._load_board()
+
+        self._latest_release = None
+        version_check.check_in_background(self._on_new_version)
 
     # ---------------- tooltips ----------------
 
@@ -418,6 +423,72 @@ class App(ctk.CTk):
             titles, text="Aces High - Friday Squad Operations",
             text_color=theme.TEXT_BODY, font=ctk.CTkFont(size=11),
         ).pack(anchor="w")
+
+        # The update notice lives here, packed only if the check finds
+        # something newer. Built empty so the masthead layout settles
+        # before any answer comes back off the network.
+        # Light/Dark is a segmented button rather than a checkbox: the
+        # two modes are peers, and the control says which one is on
+        # without the user having to work out what "dark mode: off"
+        # leaves them with.
+        self.appearance_picker = ctk.CTkSegmentedButton(
+            masthead, values=list(theme.MODES), command=self.on_appearance_changed,
+            width=140, font=ctk.CTkFont(size=11, weight="bold"),
+            selected_color=theme.ACCENT_GREEN, selected_hover_color=theme.ACCENT_GREEN_HOVER,
+            unselected_color=theme.ACCENT_OLIVE, unselected_hover_color=theme.ACCENT_OLIVE_HOVER,
+            text_color=theme.TEXT_CREAM,
+        )
+        self.appearance_picker.set(theme.get_mode())
+        self.appearance_picker.pack(side="right", padx=(0, 14), pady=8)
+
+        self.update_button = ctk.CTkButton(
+            masthead, text="", width=0, command=self._open_release_page,
+            fg_color=theme.ACCENT_GREEN, hover_color=theme.ACCENT_GREEN_HOVER,
+            text_color=theme.TEXT_HEADING, font=ctk.CTkFont(size=12, weight="bold"),
+        )
+
+    # ---------------- appearance ----------------
+
+    def on_appearance_changed(self, mode: str) -> None:
+        """Switch light/dark and remember the choice.
+
+        theme.set_mode restyles ttk and calls back the grids and charts;
+        the CTk widgets recolour themselves from their (light, dark)
+        pairs. Nothing is rebuilt and no restart is needed.
+        """
+        theme.set_mode(mode)
+        settings.save(appearance_mode=theme.get_mode())
+
+    # ---------------- update notice ----------------
+
+    def _on_new_version(self, release):
+        """Called from the version-check thread - bounce to the GUI
+        thread. Wrapped because the window may already be closing when
+        the answer lands; `after` on a dead interpreter raises."""
+        try:
+            self.after(0, self._show_version_notice, release)
+        except Exception:  # window gone
+            pass
+
+    def _show_version_notice(self, release):
+        """A clickable badge in the masthead. Never a modal - a popup in
+        front of the app on launch is a worse greeting than a button the
+        user can ignore forever."""
+        if not self.winfo_exists():
+            return
+        self._latest_release = release
+        self.update_button.configure(text=f"Update available: v{release.version}")
+        self.update_button.pack(side="right", padx=14, pady=8)
+
+    def _open_release_page(self):
+        """Open the release page in the browser. The app downloads and
+        installs nothing itself."""
+        release = getattr(self, "_latest_release", None)
+        url = release.url if release else version_check.RELEASES_PAGE
+        try:
+            webbrowser.open(url)
+        except Exception:  # no browser configured; nothing useful to do
+            pass
 
     # ---------------- top bar ----------------
 

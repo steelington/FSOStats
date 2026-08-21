@@ -103,11 +103,11 @@ class GridView:
                 "<KeyRelease>", lambda _e: self.set_quick_filter(self.quick_entry.get()))
             ctk.CTkButton(
                 bar, text="Clear", width=54, height=26, command=self._clear_all,
-                fg_color=theme.PANEL_BG_ALT, hover_color=theme.BORDER_GRAY,
+                fg_color=theme.PANEL_BG_ALT, hover_color=theme.BORDER_GRAY, text_color=theme.TEXT_BODY,
             ).pack(side="left", padx=4)
             self.export_btn = ctk.CTkButton(
                 bar, text="Export CSV", width=90, height=26, command=self.export_csv,
-                fg_color=theme.PANEL_BG_ALT, hover_color=theme.ACCENT_OLIVE_HOVER)
+                fg_color=theme.PANEL_BG_ALT, hover_color=theme.ACCENT_OLIVE_HOVER, text_color=theme.TEXT_BODY)
             self.export_btn.pack(side="left")
             self.count_label = ctk.CTkLabel(
                 bar, text="", text_color=theme.BORDER_GRAY,
@@ -131,6 +131,9 @@ class GridView:
         self.container.grid_columnconfigure(0, weight=1)
 
         theme.configure_zebra_tags(self.tree)
+        # Row tags hold flat colours, so they have to be re-set and the
+        # rows re-inserted when the app switches light/dark.
+        theme.on_mode_change(self._apply_mode)
         self.tree.bind("<Button-3>", self._on_right_click)
 
         # Column help, shown when the pointer rests on a heading. The
@@ -144,6 +147,14 @@ class GridView:
             self.set_columns(columns, wide=wide)
 
     # -- layout -------------------------------------------------------
+
+    def _apply_mode(self) -> None:
+        """Re-tag every row for the current appearance mode.
+
+        Raises once the grid is destroyed, which is how theme drops a
+        dead listener - see theme.on_mode_change."""
+        theme.configure_zebra_tags(self.tree)
+        self._rebuild()
 
     def pack(self, **kwargs):
         self.container.pack(**kwargs)
@@ -369,11 +380,11 @@ class GridView:
         ctk.CTkButton(buttons, text="Apply", command=apply_filter, width=90).pack(side="left", padx=4)
         ctk.CTkButton(
             buttons, text="Clear", command=clear_filter, width=90,
-            fg_color=theme.PANEL_BG_ALT, hover_color=theme.BORDER_GRAY,
+            fg_color=theme.PANEL_BG_ALT, hover_color=theme.BORDER_GRAY, text_color=theme.TEXT_BODY,
         ).pack(side="left", padx=4)
         ctk.CTkButton(
             buttons, text="Cancel", command=dialog.destroy, width=90,
-            fg_color=theme.PANEL_BG_ALT, hover_color=theme.BORDER_GRAY,
+            fg_color=theme.PANEL_BG_ALT, hover_color=theme.BORDER_GRAY, text_color=theme.TEXT_BODY,
         ).pack(side="left", padx=4)
 
         text_entry.focus_set()
