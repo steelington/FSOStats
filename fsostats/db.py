@@ -132,9 +132,18 @@ class FSODB:
             ("frame_no", "INTEGER"),
             ("excluded", "INTEGER NOT NULL DEFAULT 0"),
             ("one_sided", "INTEGER NOT NULL DEFAULT 0"),
+            # Which of the site's eleven dropdowns this event came from.
+            ("event_type", "TEXT NOT NULL DEFAULT 'FSO'"),
         ):
             if column not in have:
                 self._conn.execute(f"ALTER TABLE events ADD COLUMN {column} {ddl}")
+
+                # Every row predating this column is FSO: that is all the
+                # scraper could fetch. The DEFAULT covers it, but be
+                # explicit so a later NULL cannot be mistaken for FSO.
+                if column == "event_type":
+                    self._conn.execute(
+                        "UPDATE events SET event_type = 'FSO' WHERE event_type IS NULL")
 
     def close(self):
         self._conn.close()
@@ -143,11 +152,14 @@ class FSODB:
 
     def upsert_event_listings(self, listings: list[EventListing]) -> None:
         now = _now()
-        rows = [(l.event_id, l.submitter, l.event_date, l.title, now) for l in listings]
+        rows = [(l.event_id, l.submitter, l.event_date, l.title, now,
+                 getattr(l, "event_type", "FSO")) for l in listings]
         self._conn.executemany(
-            "INSERT INTO events (event_id, submitter, event_date, title, fetched_at) VALUES (?,?,?,?,?) "
+            "INSERT INTO events (event_id, submitter, event_date, title, fetched_at, event_type) "
+            "VALUES (?,?,?,?,?,?) "
             "ON CONFLICT(event_id) DO UPDATE SET submitter=excluded.submitter, "
-            "event_date=excluded.event_date, title=excluded.title",
+            "event_date=excluded.event_date, title=excluded.title, "
+            "event_type=excluded.event_type",
             rows,
         )
         self._conn.commit()

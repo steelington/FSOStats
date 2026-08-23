@@ -59,9 +59,21 @@ class FSOClient:
         resp.raise_for_status()
         return resp.text
 
-    def fetch_fso_event_log(self, event_id: int) -> str:
+    def fetch_event_log(self, event_id: int, event_type: str = "FSO") -> str:
+        """Fetch one event's log page.
+
+        The landing page carries eleven near-identical forms, one per event
+        type, all posting to this same URL with the same `event_id` field
+        and differing only in the submit button's value - `Get FSO Logs`,
+        `Get Snapshot Logs`, and so on. So one endpoint serves every type
+        and `event_id` is a single id space across all of them.
+        """
         self._throttle()
-        data = {"event_id": str(event_id), "action": "Get FSO Logs"}
+        data = {"event_id": str(event_id), "action": f"Get {event_type} Logs"}
         resp = self._session.post(EVENT_LOGS_URL, data=data, timeout=self.timeout)
         resp.raise_for_status()
         return resp.text
+
+    def fetch_fso_event_log(self, event_id: int) -> str:
+        """Back-compatible alias; the GUI's updater calls this."""
+        return self.fetch_event_log(event_id, "FSO")

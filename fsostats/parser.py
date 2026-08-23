@@ -31,23 +31,43 @@ class EventListing:
     submitter: str
     event_date: str  # "YYYY-MM-DD HH:MM:SS"
     title: str
+    event_type: str = "FSO"
 
 
-_OPTION_RE = re.compile(
-    r"^(?P<submitter>.+?):\s*(?P<date>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}):\s*FSO:\s*(?P<title>.*)$"
-)
+# Every type the landing page offers, as its <form name>. This is the
+# authoritative spelling: it is what `Get <type> Logs` must say, and it
+# matches the legacy database's event_type enum.
+EVENT_TYPES = [
+    "FSO", "Snapshot", "KOTH", "SEC", "Scenario", "TDI",
+    "HMS", "CC", "FE", "SnS", "SDL",
+]
 
 
-def parse_fso_event_list(html: str) -> list[EventListing]:
-    """Extract every FSO event from the <form name="FSO"> dropdown on the
-    event-logs landing page."""
+def _option_re(event_type: str) -> re.Pattern:
+    """Option labels read `submitter: date: TYPE: title`."""
+    return re.compile(
+        r"^(?P<submitter>.+?):\s*(?P<date>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}):\s*"
+        + re.escape(event_type)
+        + r":\s*(?P<title>.*)$"
+    )
+
+
+def parse_event_list(html: str, event_type: str = "FSO") -> list[EventListing]:
+    """Extract every event of one type from its dropdown on the event-logs
+    landing page.
+
+    Each type has its own `<form name="FSO"|"Snapshot"|...>` wrapping a
+    `<select name="event_id">`, so the form name is the type label.
+    """
     soup = BeautifulSoup(html, "lxml")
-    form = soup.find("form", attrs={"name": "FSO"})
+    form = soup.find("form", attrs={"name": event_type})
     if form is None:
         return []
     select = form.find("select", attrs={"name": "event_id"})
     if select is None:
         return []
+
+    option_re = _option_re(event_type)
 
     listings = []
     for opt in select.find_all("option"):
@@ -55,7 +75,7 @@ def parse_fso_event_list(html: str) -> list[EventListing]:
         if not value.isdigit():
             continue
         raw = _text(opt)
-        m = _OPTION_RE.match(raw)
+        m = option_re.match(raw)
         if m:
             listings.append(
                 EventListing(
@@ -63,11 +83,18 @@ def parse_fso_event_list(html: str) -> list[EventListing]:
                     submitter=m.group("submitter"),
                     event_date=m.group("date"),
                     title=m.group("title"),
+                    event_type=event_type,
                 )
             )
         else:
-            listings.append(EventListing(event_id=int(value), submitter="", event_date="", title=raw))
+            listings.append(EventListing(event_id=int(value), submitter="", event_date="",
+                                         title=raw, event_type=event_type))
     return listings
+
+
+def parse_fso_event_list(html: str) -> list[EventListing]:
+    """Back-compatible alias; the GUI's updater calls this."""
+    return parse_event_list(html, "FSO")
 
 
 # ---------------------------------------------------------------------------
@@ -238,6 +265,13 @@ def _parse_top_entries(table, side: str) -> list:
 
 
 def parse_fso_event(html: str, event_id: int) -> FSOEvent | None:
+    """Parse one event's log page.
+
+    Despite the name this is type-agnostic - it keys off the page's own
+    structure (an `<h3>` title, one `<h2>` per side inside that side's
+    table) and nothing FSO-specific - so it reads a Snapshot or Scenario
+    page unchanged. `parse_event` is the neutral alias.
+    """
     if not html:
         return None
     soup = BeautifulSoup(html, "lxml")
@@ -341,6 +375,10 @@ def parse_fso_event(html: str, event_id: int) -> FSOEvent | None:
 
     _disambiguate_squads(event)
     return event
+
+
+#: Neutral name for the same function, for callers scraping other types.
+parse_event = parse_fso_event
 
 
 def _disambiguate_squads(event: FSOEvent) -> None:

@@ -1,9 +1,16 @@
-"""One-shot / resumable scrape of every FSO event log from ahevents.net
-into fsostats.db. Safe to re-run: already-fetched events are skipped,
-so this doubles as the "check for new events" monthly update job.
+"""One-shot / resumable scrape of event logs from ahevents.net into
+fsostats.db. Safe to re-run: already-fetched events are skipped, so this
+doubles as the "check for new events" monthly update job.
+
+Handles any of the site's eleven event types, one per run:
+
+    python scrape_fso.py --type Snapshot
+
+One type per invocation is deliberate. Each type resumes independently,
+and a type whose listing page misbehaves cannot stall the others.
 
 Usage:
-    python scrape_fso.py [--workers N] [--interval SECONDS]
+    python scrape_fso.py [--type TYPE] [--workers N] [--interval SECONDS]
 
 Most of the wall time is spent waiting on ahevents.net (roughly nine
 seconds a page, against a three second rate limit), so fetching in
@@ -27,7 +34,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from fsostats.client import FSOClient
 from fsostats.db import FSODB
-from fsostats.parser import parse_fso_event, parse_fso_event_list
+from fsostats.parser import EVENT_TYPES, parse_event, parse_event_list
 
 DEFAULT_WORKERS = 3
 DEFAULT_INTERVAL = 3.0
@@ -45,22 +52,52 @@ DEFAULT_INTERVAL = 3.0
 #
 # 24 Jul 2026 is August Storm Frame 3, the last frame of a complete
 # campaign. Move this forward only when the newest campaign is complete.
+#
+# This cutoff is FSO-only. No other type has been scraped or curated, so
+# for those the default is to take everything (see _parse_args).
 SCRAPE_SINCE = "2026-07-24"
 
 
 def _parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--type", dest="event_type", default="FSO", choices=EVENT_TYPES,
+                        metavar="TYPE",
+                        help="event type to scrape (default FSO). One of: "
+                             + ", ".join(EVENT_TYPES))
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS,
                         help=f"parallel fetchers (default {DEFAULT_WORKERS})")
     parser.add_argument("--interval", type=float, default=DEFAULT_INTERVAL,
                         help=f"min seconds between requests per worker (default {DEFAULT_INTERVAL})")
-    parser.add_argument("--since", default=SCRAPE_SINCE, metavar="YYYY-MM-DD",
-                        help=f"ignore events on or before this date (default {SCRAPE_SINCE})")
+    parser.add_argument("--since", default=None, metavar="YYYY-MM-DD",
+                        help=f"ignore events on or before this date "
+                             f"(FSO defaults to {SCRAPE_SINCE}; other types take everything)")
     parser.add_argument("--all", action="store_true",
                         help="ignore --since and consider every event on the site. "
                              "Rebuilds from scratch; overwrites curated titles, so "
                              "re-run with --retitle afterwards.")
-    return parser.parse_args()
+    parser.add_argument("--report", default=None, metavar="PATH",
+                        help="TSV of every event that did not come back clean "
+                             "(default scrape_report_<type>.tsv)")
+    parser.add_argument("--db", default=None, metavar="PATH",
+                        help="database to write (default fsostats.db for FSO, "
+                             "scrape_<type>.db otherwise)")
+    args = parser.parse_args()
+
+    # Only FSO has a curated history to protect; everything else starts empty.
+    if args.since is None and args.event_type == "FSO":
+        args.since = SCRAPE_SINCE
+
+    if args.report is None:
+        args.report = f"scrape_report_{args.event_type}.tsv"
+
+    # fsostats.db is the FSOStats app's shipped database, and the GUI has
+    # no event-type filter - it was written when FSO was all there was. So
+    # other types go to their own file rather than making an FSO-only app
+    # display Snapshots. Pass --db explicitly to override.
+    if args.db is None and args.event_type != "FSO":
+        args.db = f"scrape_{args.event_type}.db"
+
+    return args
 
 
 def main():
@@ -74,14 +111,21 @@ def main():
     for _ in range(workers):
         clients.put(FSOClient(min_interval=args.interval))
 
-    db = FSODB()
+    db = FSODB(args.db) if args.db else FSODB()
+    print(f"Writing to {db.path}", flush=True)
 
-    print("Fetching event list...", flush=True)
+    print(f"Fetching {args.event_type} event list...", flush=True)
     listing_client = FSOClient(min_interval=args.interval)
-    listings = parse_fso_event_list(listing_client.fetch_landing_page())
-    print(f"Found {len(listings)} FSO events.", flush=True)
+    listings = parse_event_list(listing_client.fetch_landing_page(), args.event_type)
+    print(f"Found {len(listings)} {args.event_type} events.", flush=True)
 
-    if not args.all:
+    if not listings:
+        print(f"No <form name=\"{args.event_type}\"> dropdown on the landing page. "
+              f"Has the site changed?", flush=True)
+        db.close()
+        return
+
+    if not args.all and args.since:
         # event_date is "YYYY-MM-DD HH:MM:SS", so a string compare against
         # a bare date is a plain date comparison.
         recent = [l for l in listings if (l.event_date or "")[:10] > args.since]
@@ -100,16 +144,23 @@ def main():
         """Runs on a worker thread: fetch and parse only, no DB access."""
         client = clients.get()
         try:
-            html = client.fetch_fso_event_log(listing.event_id)
-            return listing, parse_fso_event(html, listing.event_id), None
+            html = client.fetch_event_log(listing.event_id, args.event_type)
+            return listing, parse_event(html, listing.event_id), None
         except Exception as e:
             return listing, None, e
         finally:
             clients.put(client)
 
-    ok = failed = done = 0
+    ok = failed = done = partial = 0
     start = time.monotonic()
     print_lock = threading.Lock()
+
+    # Every event that did not come back clean, for the report. A failure
+    # here is a real finding, not just noise: a CM confirmed some older
+    # events cannot be rendered by the live site at all even though their
+    # rows exist in its database, so this list is precisely the set that
+    # only a database dump can recover.
+    problems: list[tuple[str, int, str, str, str]] = []
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         # imap-style: results arrive as they complete, and the main
@@ -122,15 +173,36 @@ def main():
             with print_lock:
                 if error is not None:
                     failed += 1
+                    problems.append((args.event_type, listing.event_id, listing.event_date,
+                                     listing.title, f"error: {type(error).__name__}: {error}"))
                     print(f"[{done}/{len(to_fetch)}] event {listing.event_id}: "
                           f"ERROR {type(error).__name__}: {error}", flush=True)
                     traceback.print_exception(type(error), error, error.__traceback__)
                     continue
                 if event is None:
                     failed += 1
+                    problems.append((args.event_type, listing.event_id, listing.event_date,
+                                     listing.title, "no data: site returned an unparseable page"))
                     print(f"[{done}/{len(to_fetch)}] event {listing.event_id} ({listing.event_date}): "
                           f"no data / unexpected page, skipping", flush=True)
                     continue
+
+                # Completeness, not just success. 31 events in the existing
+                # data returned HTTP 200 with plausible output and every log
+                # entry on a single side - they render as if complete. Some
+                # events genuinely are one-sided (the other team's log was
+                # never posted), so this is recorded rather than rejected:
+                # the side that did come back is real data.
+                sides = {e.side for e in event.log_entries}
+
+                if len(sides) < 2:
+                    partial += 1
+                    problems.append((
+                        args.event_type, listing.event_id, listing.event_date, listing.title,
+                        f"incomplete: {len(sides)} side(s) "
+                        f"({', '.join(sorted(sides)) or 'none'}), "
+                        f"{len(event.log_entries)} log lines",
+                    ))
 
                 # A save that fails - a malformed page violating a key,
                 # say - must not take the rest of the run with it. The
@@ -145,18 +217,38 @@ def main():
                     continue
 
                 ok += 1
+                flag = "  ** ONE SIDE ONLY **" if len(sides) < 2 else ""
                 print(f"[{done}/{len(to_fetch)}] event {listing.event_id} ({listing.event_date}): "
                       f"{listing.title[:50]!r} - {len(event.log_entries)} log lines, "
-                      f"{len(event.participants)} pilots. ETA {eta_min:.1f} min", flush=True)
+                      f"{len(event.participants)} pilots. ETA {eta_min:.1f} min{flag}", flush=True)
 
-    print(f"\nDone. {ok} fetched, {failed} failed, {len(fetched)} already cached.", flush=True)
+    print(f"\nDone. {ok} fetched ({partial} of them one-sided), {failed} failed, "
+          f"{len(fetched)} already cached.", flush=True)
 
-    # New frames arrive untitled; this names them, and picks up any
-    # correction added to campaigns.py since the last run.
-    counts = db.apply_campaign_metadata()
-    print(f"Named and grouped: {counts['curated']} curated, "
-          f"{counts['clustered']} campaigns, {counts['excluded']} excluded, "
-          f"{counts['one_sided']} frames with only one side's log.", flush=True)
+    if problems:
+        with open(args.report, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write("type\tevent_id\tevent_date\ttitle\tproblem\n")
+            for row in sorted(problems, key=lambda r: r[1]):
+                fh.write("\t".join(str(c).replace("\t", " ") for c in row) + "\n")
+        print(f"{len(problems)} event(s) did not come back clean -> {args.report}", flush=True)
+
+    # Campaign clustering is FSO-specific and unscoped: it reads every row
+    # in the table and invents campaign names from date proximity, using
+    # the curated FSO data in campaigns.py. Run on a Snapshot scrape it
+    # would group unrelated weekly events into fictional campaigns and
+    # overwrite their display titles.
+    if args.event_type == "FSO":
+        # New frames arrive untitled; this names them, and picks up any
+        # correction added to campaigns.py since the last run.
+        counts = db.apply_campaign_metadata()
+        print(f"Named and grouped: {counts['curated']} curated, "
+              f"{counts['clustered']} campaigns, {counts['excluded']} excluded, "
+              f"{counts['one_sided']} frames with only one side's log.", flush=True)
+    else:
+        print(f"Skipping campaign clustering: it is curated for FSO only.", flush=True)
+
+    # Side-role inference reads only the side names on each event, so it is
+    # safe for any type.
     roles = db.apply_side_roles()
     print(f"Side roles inferred: {roles['allied']} allied, {roles['axis']} axis, "
           f"{roles['unknown']} unknown.", flush=True)
