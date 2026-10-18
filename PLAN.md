@@ -272,5 +272,10 @@ and ask first.
    new frames; a copy of a real 0.2.0 database updates through the
    button ("Added 9 frame(s)") to identical figures; Frame detail shows
    derived team totals and the submitter. Testing first run frozen found
-   0.2.0's invisible-window bug (see CLAUDE.md) - fixed. Still to do:
-   push, tag v0.2.1, GitHub release with the exe and db.gz.
+   0.2.0's invisible-window bug (see CLAUDE.md) - fixed.
+
+   **Released 18 Oct 2026:** tag v0.2.1 on Gitea and GitHub,
+   https://github.com/steelington/FSOStats/releases/tag/v0.2.1 with
+   FSOStats.exe (sha256 fd22c10a...; the db is bundled inside, as in
+   0.2.0). The latest-release API answers v0.2.1, so 0.2.0 installs show
+   the Update-available badge.
