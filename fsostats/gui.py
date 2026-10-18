@@ -187,7 +187,7 @@ class App(ctk.CTk):
         # splash must be a Toplevel of this window, not a second CTk():
         # two roots put the masthead image in the wrong interpreter and
         # tkinter fails with 'image "pyimage1" doesn't exist'.
-        self.db = FSODB(self._seed_database())
+        self.db = self._open_database()
         self._logo_image = None  # a CTkImage must outlive the widget
         self._updater: Updater | None = None
         self._update_added = 0
@@ -342,15 +342,25 @@ class App(ctk.CTk):
             "Best": "Best single-frame figure the site recorded.",
         })
 
-    def _seed_database(self):
+    def _open_database(self) -> FSODB:
         """Open the writable database, unpacking the shipped copy first
-        if this is the first run. Returns the path to open."""
+        if this is the first run.
+
+        The open happens behind the splash too: the shipped copy has no
+        indexes, and FSODB rebuilds them on first open - the "nearly
+        there" step the splash announces.
+        """
         from fsostats.paths import DB_FILENAME, get_app_data_dir
 
         if (get_app_data_dir() / DB_FILENAME).exists():
-            return get_database_path()
+            return FSODB(get_database_path())
 
-        self.withdraw()                 # don't show a half-built window
+        # Don't show a half-built window - but hide it with tkinter's own
+        # withdraw, not CTk's. CTk.withdraw() before mainloop() sets a flag
+        # that makes mainloop() decline to show the window at all, so the
+        # first run sat invisible in the background. mainloop() shows the
+        # window once everything is built, as it does on every other run.
+        tk.Tk.withdraw(self)
         splash = ctk.CTkToplevel(self)
         splash.title("FSO Stats")
         splash.geometry("430x120")
@@ -369,10 +379,9 @@ class App(ctk.CTk):
         try:
             path = get_database_path(progress=progress)
             progress("Building indexes, nearly there...")
-            return path
+            return FSODB(path)
         finally:
             splash.destroy()
-            self.deiconify()
 
     def destroy(self):
         if self._updater is not None:

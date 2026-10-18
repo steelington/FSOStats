@@ -265,3 +265,12 @@ and ask first.
    179 tests (`tests/test_api.py` new).
 3. Commit, bump `__version__` to 0.2.1, `prepare_db`, build, release.
    The in-app badge then moves 0.2.0 users off the old site.
+
+   **Built 18 Oct 2026, not released.** `dist/FSOStats.exe` 45.5 MB
+   (bs4/lxml gone), shipped db 18.9 MB with 592 frames. Run locally:
+   first run into an empty LOCALAPPDATA unpacks and opens on the nine
+   new frames; a copy of a real 0.2.0 database updates through the
+   button ("Added 9 frame(s)") to identical figures; Frame detail shows
+   derived team totals and the submitter. Testing first run frozen found
+   0.2.0's invisible-window bug (see CLAUDE.md) - fixed. Still to do:
+   push, tag v0.2.1, GitHub release with the exe and db.gz.

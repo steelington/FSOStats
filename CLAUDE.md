@@ -117,6 +117,13 @@ puts the masthead image in the wrong interpreter and tkinter dies with
 `image "pyimage1" doesn't exist` - which only happens on first run, so
 it will not show up in ordinary testing.
 
+**Hide the main window behind the splash with `tk.Tk.withdraw`, never
+CTk's.** `CTk.withdraw()` before `mainloop()` sets a flag that makes
+`mainloop()` decline to show the window at all. 0.2.0 did exactly that,
+so its first run sat invisible in the background - and the next launch
+worked, which hid the bug. Test first run frozen with `LOCALAPPDATA`
+pointed at an empty folder; the dev database never takes that path.
+
 `fsostats/data/fsostats.db.gz` is a build artefact, gitignored. It
 travels as a release asset beside the exe.
 

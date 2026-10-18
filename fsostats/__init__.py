@@ -6,4 +6,4 @@
 #
 # Bump this in the same commit that tags a release - a git tag on its own
 # leaves the running app claiming the previous version.
-__version__ = "0.2.0"
+__version__ = "0.2.1"
