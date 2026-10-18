@@ -4,10 +4,11 @@ Guidance for Claude Code working in this repository.
 
 ## Project
 
-FSOSTATS views Aces High **Friday Squad Operations** statistics, scraped
-from ahevents.net into a local SQLite cache. It's a sibling to E:\AHSTATS
-(the same idea for the main-arena tour stats) and will reuse that
-project's UI components.
+FSOSTATS views Aces High **Friday Squad Operations** statistics, read
+from the aceshigh.events log API into a local SQLite cache (the history
+was originally scraped from ahevents.net's pages). It's a sibling to
+E:\AHSTATS (the same idea for the main-arena tour stats) and will reuse
+that project's UI components.
 
 **Read `PLAN.md` and `FINDINGS.md` first.** They hold the feature plan,
 the data-layer bugs already fixed, and the open TODOs. Don't re-derive
@@ -32,8 +33,8 @@ porting.
 
 ## Layout
 
-    fsostats/client.py      rate-limited HTTP client for ahevents.net
-    fsostats/parser.py      BeautifulSoup parsing of the event-log pages
+    fsostats/client.py      rate-limited client for the aceshigh.events API
+    fsostats/parser.py      API JSON -> records; line patterns, derived stats
     fsostats/db.py          SQLite persistence (FSODB)
     fsostats/sides.py       infers Allied/Axis from aircraft flown
     fsostats/campaigns.py   frame numbers, curated titles, clustering
@@ -45,7 +46,7 @@ porting.
     fsostats/version_check.py  asks GitHub for a newer *app* release
     fsostats/settings.py    tiny JSON store for UI preferences
     fsostats/gui.py         the app; grid/chart/theme/tooltip beside it
-    scrape_fso.py           resumable scrape; --workers N, --interval S
+    scrape_fso.py           resumable fetch; --workers N, --interval S
     tests/                  pytest; toy fixtures plus real-db invariants
 
 ## Light and dark (non-obvious)
@@ -119,11 +120,11 @@ it will not show up in ordinary testing.
 `fsostats/data/fsostats.db.gz` is a build artefact, gitignored. It
 travels as a release asset beside the exe.
 
-**A fresh clone has no database and no way to get one quickly** - it has
-to scrape ~660 pages, which takes 30-60 minutes at the rate limit the
-client deliberately keeps. The app starts anyway and says so rather than
-showing empty grids; see `_show_empty_database_notice`. Point anyone who
-only wants to *use* it at the exe.
+**A fresh clone has no database** - it has to fetch ~660 frames from the
+API, about ten minutes at the rate limit the site sets. The app starts
+anyway and says so rather than showing empty grids; see
+`_show_empty_database_notice`. Point anyone who only wants to *use* it
+at the exe.
 
 ## Recomputing derived data
 
@@ -187,22 +188,41 @@ vote across all of them.
 scraper fetches in parallel but writes only from the main thread. Keep it
 that way.
 
-**A parse that finds no sides must return `None`.** Returning a
-frame-title-only event makes `get_fetched_event_ids()` treat it as
-fetched, so it can never be retried.
+**A frame with no pilots and no lines must come back `None`.**
+Returning a frame-title-only event makes `get_fetched_event_ids()` treat
+it as fetched, so it can never be retried.
 
-## Scraping
+**Classify from the sentence, not the API's action field.** New-site
+frames store HiTech's raw vocabulary (`Start Flight`, `Kill Awarded`);
+legacy ones store the scraper's (`sortie_start`, `kill`). The API sends
+the page's sentence for both, and `parser._LOG_PATTERNS` turns it into
+the same rows the 590k cached ones are. Verified on four legacy frames:
+every participant and all 4,106 lines identical to the scraped copy.
 
-ahevents.net's TLS certificate expired in Dec 2025, so the client
-disables verification for that host - a documented, accepted risk for
-read-only public data.
+## Fetching
 
-3 seconds between requests per worker, 3 workers by default. Most of the
-wall time is the site's own ~9s response, not our limit. It's a small
-community site; don't raise the worker count much.
+The source is the read-only JSON API in the aceshigh.events log app
+(E:\AHEVENTS\AHEvents_Joomla, `runApi()` in `logs/src/Application.php`):
+`/logs/api/events/{TYPE}?since=` and `/logs/api/event/{ID}`, with TLS
+verification on. ahevents.net is no longer contacted - its certificate
+expired and it was found to carry a backdoor.
 
-The scrape is resumable and doubles as the update job: it diffs the
-landing page and fetches only what's new.
+nginx limits `/logs/api/` to 2 requests/second per address, burst 20,
+answering 429 beyond that; the client backs off and retries. 2 workers
+at 1s by default, so raising the count buys nothing. A full rebuild is
+about ten minutes.
+
+The new site never posts side, squad or top-list totals for frames
+uploaded there, so `parser._derive_stats` counts them from the log
+using the old site's own rules (captures are not deaths, `crashed` is
+always 0, city targets count as objects). Squad totals are always
+derived; they matched the posted ones on 628 of 630 rows.
+
+Frame 2168 (both teams labelled "Allies") is not served by the new
+site, so a `--all` rebuild would lose it. Updates never touch it.
+
+The fetch is resumable and doubles as the update job: it asks for the
+events since `SCRAPE_SINCE` and fetches only what's new.
 
 ## Shipping
 

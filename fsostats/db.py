@@ -1,4 +1,4 @@
-"""SQLite cache for ahevents.net FSO event logs."""
+"""SQLite cache for Aces High FSO event logs."""
 from __future__ import annotations
 
 import datetime
@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS events (
     frame_title TEXT,
     fetched_at TEXT NOT NULL,
     -- Curated, derived from fsostats.campaigns. `title` stays exactly as
-    -- ahevents.net served it; everything user-facing reads these instead.
+    -- the site served it; everything user-facing reads these instead.
     display_title TEXT,
     campaign TEXT,
     frame_no INTEGER,

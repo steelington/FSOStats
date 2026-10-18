@@ -46,9 +46,12 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    # bs4/requests belong to the scraper, which the app needs for the
-    # Update button. numpy is only used by the icon build tool.
-    excludes=["numpy", "pytest", "matplotlib", "PIL.ImageQt"],
+    # requests is the API client, which the app needs for the Update
+    # button. numpy is only used by the icon build tool. bs4 and lxml
+    # parsed the old site's pages and nothing imports them any more; they
+    # are excluded so a dev machine that still has them installed does not
+    # bundle them.
+    excludes=["numpy", "pytest", "matplotlib", "PIL.ImageQt", "bs4", "lxml"],
     noarchive=False,
     optimize=0,
 )

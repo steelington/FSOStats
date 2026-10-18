@@ -1,100 +1,52 @@
-"""Parses ahevents.net's FSO event-log pages. Table-based HTML with no
-classes/ids to hook into beyond a couple of bgcolor markers, so parsing
-walks each side's table row by row as a small state machine: squad
-header -> pilot header -> log lines -> squad stats -> (repeat) -> side
-stats + leaderboards.
+"""Turns aceshigh.events API responses into FSOSTATS's records.
+
+The API (see client.py) returns structured JSON, so there is no page to
+walk. What is left to do here is the part that keeps new frames
+consistent with the 590k log rows already cached:
+
+* **Log lines are classified from their sentence**, through the same
+  `_LOG_PATTERNS` that classified every cached row when it was scraped
+  from ahevents.net's pages. The API sends the sentence for every line -
+  for frames uploaded on the new site, which store only HiTech's raw
+  fields, it is composed server-side by the same code that renders the
+  page - so a kill reads the same whichever site it came from.
+* **seq is renumbered 1..n per (side, pilot)**, as the page scraper did.
+* **Missing totals are derived from the log.** Frames uploaded on the new
+  site have no posted side, squad or top-list figures at all, and the
+  squad boards read nothing else; see `_derive_stats`.
 """
 from __future__ import annotations
 
 import re
+from collections import defaultdict
 from dataclasses import dataclass, field
 
-from bs4 import BeautifulSoup
-
-
-def _text(el) -> str:
-    return el.get_text(strip=True).replace("\xa0", " ").strip() if el else ""
-
-
-def _to_int(s: str, default=0):
-    m = re.search(r"-?\d+", s.replace(",", ""))
-    return int(m.group()) if m else default
+# The response shape this build reads. The server bumps its `api` number
+# only when it renames or removes something, so a different one means
+# fields this code relies on may be gone - refuse rather than misread.
+API_VERSION = 1
 
 
 # ---------------------------------------------------------------------------
-# event list (landing page dropdown)
+# event list
 # ---------------------------------------------------------------------------
 
 @dataclass
 class EventListing:
     event_id: int
     submitter: str
-    event_date: str  # "YYYY-MM-DD HH:MM:SS"
+    event_date: str  # "YYYY-MM-DD HH:MM:SS", US Central
     title: str
     event_type: str = "FSO"
 
 
-# Every type the landing page offers, as its <form name>. This is the
-# authoritative spelling: it is what `Get <type> Logs` must say, and it
-# matches the legacy database's event_type enum.
+# Every type the site keeps logs for. This is the authoritative spelling:
+# it is what the API's /events/{TYPE} takes, and it matches the legacy
+# database's event_type enum.
 EVENT_TYPES = [
     "FSO", "Snapshot", "KOTH", "SEC", "Scenario", "TDI",
     "HMS", "CC", "FE", "SnS", "SDL",
 ]
-
-
-def _option_re(event_type: str) -> re.Pattern:
-    """Option labels read `submitter: date: TYPE: title`."""
-    return re.compile(
-        r"^(?P<submitter>.+?):\s*(?P<date>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}):\s*"
-        + re.escape(event_type)
-        + r":\s*(?P<title>.*)$"
-    )
-
-
-def parse_event_list(html: str, event_type: str = "FSO") -> list[EventListing]:
-    """Extract every event of one type from its dropdown on the event-logs
-    landing page.
-
-    Each type has its own `<form name="FSO"|"Snapshot"|...>` wrapping a
-    `<select name="event_id">`, so the form name is the type label.
-    """
-    soup = BeautifulSoup(html, "lxml")
-    form = soup.find("form", attrs={"name": event_type})
-    if form is None:
-        return []
-    select = form.find("select", attrs={"name": "event_id"})
-    if select is None:
-        return []
-
-    option_re = _option_re(event_type)
-
-    listings = []
-    for opt in select.find_all("option"):
-        value = opt.get("value", "")
-        if not value.isdigit():
-            continue
-        raw = _text(opt)
-        m = option_re.match(raw)
-        if m:
-            listings.append(
-                EventListing(
-                    event_id=int(value),
-                    submitter=m.group("submitter"),
-                    event_date=m.group("date"),
-                    title=m.group("title"),
-                    event_type=event_type,
-                )
-            )
-        else:
-            listings.append(EventListing(event_id=int(value), submitter="", event_date="",
-                                         title=raw, event_type=event_type))
-    return listings
-
-
-def parse_fso_event_list(html: str) -> list[EventListing]:
-    """Back-compatible alias; the GUI's updater calls this."""
-    return parse_event_list(html, "FSO")
 
 
 # ---------------------------------------------------------------------------
@@ -159,14 +111,22 @@ class FSOEvent:
     top_entries: list = field(default_factory=list)  # list[TopEntry]
 
 
+# Two wordings exist for a death nobody was credited with. ahevents.net
+# printed the template with the gap left in - "Was shot down by   ." - and
+# aceshigh.events says what it means: "Was shot down.", "Crashed.". Both
+# classify the same way, a death with no other_pilot.
+#
+# Likewise "Destroyed a ammo bunker" (old) and "Destroyed an ammo bunker"
+# (new): the new site fixed the article.
 _LOG_PATTERNS = [
     ("sortie_start", re.compile(r"^Departed from Field #(?P<field>\d+) in a (?P<plane>.+)$")),
     ("landed", re.compile(r"^Arrived Safely at Field #(?P<field>\d+)$")),
-    ("death", re.compile(r"^Was shot down by\s*(?P<other>.*?)\s*(?:\((?P<how>exploded|crashed)\))?\s*(?P<captured>and captured)?\.?$")),
+    ("death", re.compile(r"^Was shot down(?:\s+by)?\s*(?P<other>.*?)\s*(?:\((?P<how>exploded|crashed)\))?\s*(?P<captured>and captured)?\.?$")),
+    ("death", re.compile(r"^(?P<how>Crashed)\.?$")),
     ("kill", re.compile(r"^Shot down a (?P<plane>.+) flown by (?P<other>.+)\.$")),
     ("assist", re.compile(r"^Helps (?P<other>.+) shoot down (?P<victim>.+)\.$")),
     ("kill", re.compile(r"^Awarded kill as (?P<other>.+) crashes in a (?P<plane>.+)\.$")),
-    ("ground_kill", re.compile(r"^Destroyed (?P<detail>a .+) at base #(?P<field>\d+)\s*$")),
+    ("ground_kill", re.compile(r"^Destroyed (?P<detail>an? .+) at base #(?P<field>\d+)\s*$")),
     ("bailed", re.compile(r"^Bravely Bailed from damaged plane\.?$")),
     ("ditched", re.compile(r"^Skillfully ditched\.?$")),
     ("refuel", re.compile(r"^Takes on fuel/ammo/ord at field #(?P<field>\d+)\.?$")),
@@ -182,7 +142,8 @@ def _classify_log_line(desc: str) -> dict:
         result = {"action": action}
         if action == "death":
             result["other_pilot"] = gd.get("other") or None
-            bits = [b for b in (gd.get("how"), "captured" if gd.get("captured") else None) if b]
+            how = (gd.get("how") or "").lower() or None
+            bits = [b for b in (how, "captured" if gd.get("captured") else None) if b]
             result["detail"] = ", ".join(bits) or None
         elif action == "kill":
             result["plane"] = gd.get("plane")
@@ -201,197 +162,193 @@ def _classify_log_line(desc: str) -> dict:
     return {"action": "other"}
 
 
-_LOG_LINE_RE = re.compile(r"^(\d{2}:\d{2}:\d{2})\s+(.*)$")
-_TOP_ENTRY_RE = re.compile(r"^(?P<name>.+?)\s*\((?P<squad>.+)\):\s*(?P<value>\d+)$")
-_TOP_SQUAD_RE = re.compile(r"^(?P<name>.+?):\s*(?P<value>\d+)$")
+# ---------------------------------------------------------------------------
+# API responses -> records
+# ---------------------------------------------------------------------------
+
+def _check_version(data: dict) -> None:
+    if data.get("api") != API_VERSION:
+        raise ValueError(f"aceshigh.events API version {data.get('api')!r}; "
+                         f"this build of FSO Stats reads version {API_VERSION}. "
+                         f"A newer release should read it.")
 
 
-def _parse_group_stats_table(table, side: str, squad: str | None) -> GroupStats:
-    stats = GroupStats(side=side, squad=squad)
-    label_map = {
-        "pilots": "pilots", "kills": "kills", "assists": "assists",
-        "obj destroyed": "obj_destroyed", "objects destroyed": "obj_destroyed",
-        "deaths": "deaths", "landed": "landed", "bailed": "bailed",
-        "captured": "captured", "crashed": "crashed", "ditched": "ditched",
-        "disco'd": "discos",
-    }
-    for row in table.find_all("tr"):
-        cells = row.find_all("td")
-        if len(cells) >= 4:
-            continue  # skip leaderboard rows (colspan=3 single-cell rows handled elsewhere)
-        for cell in cells:
-            txt = _text(cell)
-            if ":" not in txt:
-                continue
-            label, _, val = txt.partition(":")
-            field_name = label_map.get(label.strip().lower())
-            if field_name:
-                setattr(stats, field_name, _to_int(val))
-    return stats
+def listings_from_api(data: dict) -> list[EventListing]:
+    """The events in an /events/{TYPE} response, newest first."""
+    _check_version(data)
+    return [
+        EventListing(
+            event_id=int(e["source_id"]),
+            submitter=e.get("submitter") or "",
+            event_date=e.get("event_date") or "",
+            title=e.get("title") or "",
+            event_type=e.get("event_type") or "FSO",
+        )
+        for e in data["events"]
+    ]
 
 
-def _parse_top_entries(table, side: str) -> list:
-    entries = []
-    category = None
-    rank = 0
-    category_map = {
-        "top pilots: kills": "pilot_kills",
-        "top pilots: objects destroyed": "pilot_obj",
-        "top squads: kills": "squad_kills",
-        "top squads: objects destroyed": "squad_obj",
-    }
-    for row in table.find_all("tr"):
-        cell = row.find("td", attrs={"colspan": "3"})
-        if cell is None:
-            continue
-        txt = _text(cell)
-        key = txt.lower()
-        if key in category_map:
-            category = category_map[key]
-            rank = 0
-            continue
-        if category is None:
-            continue
-        rank += 1
-        if category.startswith("pilot"):
-            m = _TOP_ENTRY_RE.match(txt)
-            if m:
-                entries.append(TopEntry(side, category, rank, m.group("name"), m.group("squad"), int(m.group("value"))))
-        else:
-            m = _TOP_SQUAD_RE.match(txt)
-            if m:
-                entries.append(TopEntry(side, category, rank, m.group("name"), None, int(m.group("value"))))
-    return entries
+def event_from_api(data: dict) -> FSOEvent | None:
+    """One frame from an /event/{ID} response.
 
-
-def parse_fso_event(html: str, event_id: int) -> FSOEvent | None:
-    """Parse one event's log page.
-
-    Despite the name this is type-agnostic - it keys off the page's own
-    structure (an `<h3>` title, one `<h2>` per side inside that side's
-    table) and nothing FSO-specific - so it reads a Snapshot or Scenario
-    page unchanged. `parse_event` is the neutral alias.
+    Returns None for a frame with neither pilots nor log lines - the same
+    contract the page parser had, so an empty frame is never stored as
+    fetched and stays retryable.
     """
-    if not html:
-        return None
-    soup = BeautifulSoup(html, "lxml")
+    _check_version(data)
+    head = data["event"]
+    # The title as posted, not the site's cleaned display_title: it is what
+    # the page scraper stored for every cached frame ("August Storm Frame
+    # 3", not "August Storm - Frame 3"), and campaigns.py does the cleaning.
+    event = FSOEvent(event_id=int(head["source_id"]),
+                     frame_title=head.get("title") or head.get("display_title") or "")
 
-    h3 = soup.find("h3")
-    frame_title = _text(h3)
-    if not frame_title:
-        return None
+    # Pilots are matched case-insensitively within a side, as the site
+    # does, and every row then carries one spelling - FSODB joins
+    # participants to log_entries on the exact name.
+    name_of: dict[tuple[str, str], str] = {}
 
-    event = FSOEvent(event_id=event_id, frame_title=frame_title)
-    seen_sides: dict[str, int] = {}
+    def add_pilot(side: str, pilot: str, squad: str) -> str:
+        key = (side, pilot.lower())
+        if key not in name_of:
+            name_of[key] = pilot
+            event.participants.append(Participant(side=side, squad=squad, pilot=pilot))
+        return name_of[key]
 
-    for side_header in soup.find_all("h2"):
-        side = _text(side_header)
-        # Side names are per-event, not a fixed pair: as well as
-        # Allies/Axis, frames use themed names like USAAF/Luftwaffe or
-        # Blue Thunder. What identifies a side header is its position -
-        # it sits inside the side's own table, whereas page furniture
-        # ("Event Logs", "CB Login") does not.
-        table = side_header.find_parent("table")
-        if table is None or not side:
-            continue
+    squad_of = {(p["side"], p["pilot"].lower()): p.get("squad") or "" for p in data["participants"]}
 
-        # Some frames were submitted with both sides labelled the same
-        # (event 2168 titles both "Allies"). They're still two distinct
-        # teams with their own squads and totals, so keep both and make
-        # the later one's name unique rather than merging two opposing
-        # sides together or dropping one.
-        seen_sides[side] = seen_sides.get(side, 0) + 1
-        if seen_sides[side] > 1:
-            side = f"{side} ({seen_sides[side]})"
+    for p in data["participants"]:
+        add_pilot(p["side"], p["pilot"], p.get("squad") or "")
 
-        current_squad = None
-        current_pilot = None
-        seen_pilots = set()  # (side, pilot) already added to participants
-        pilot_seq = {}  # (side, pilot) -> next seq number, keyed so a pilot
-        # who disconnects and reconnects under the same name (a second
-        # pilot_row block for them later in the same event) continues the
-        # sequence instead of colliding with their earlier log entries.
+    # The API lists lines grouped by side and pilot, each pilot's in seq
+    # order, which is all the renumbering below needs.
+    seq: dict[tuple[str, str], int] = defaultdict(int)
+    for line in data["log"]:
+        side = line["side"]
+        pilot = add_pilot(side, line["pilot"], squad_of.get((side, line["pilot"].lower()), ""))
+        key = (side, pilot.lower())
+        seq[key] += 1
+        text = line.get("text") or ""
+        event.log_entries.append(LogEntry(
+            side=side, pilot=pilot, seq=seq[key], timestamp=line.get("time") or "",
+            raw_text=text, **_classify_log_line(text),
+        ))
 
-        for row in table.find_all("tr", recursive=False):
-            cells = row.find_all("td", recursive=False)
-            if not cells:
-                continue
-            cell = cells[0]
-            bgcolor = (cell.get("bgcolor") or row.get("bgcolor") or "").lower()
-
-            if cell.find("h2"):
-                continue  # the "Allies"/"Axis" title row itself
-
-            if bgcolor == "#877634":
-                current_squad = _text(cell).rstrip()
-                continue
-
-            if cell.get("class") and "pilot_row" in cell.get("class"):
-                current_pilot = _text(cell)
-                key = (side, current_pilot)
-                if key not in seen_pilots:
-                    seen_pilots.add(key)
-                    pilot_seq[key] = 0
-                    event.participants.append(Participant(side=side, squad=current_squad or "", pilot=current_pilot))
-                # else: pilot reconnected under the same name within this
-                # event - keep their original squad and continue the seq
-                # counter below rather than re-adding/duplicating them.
-                continue
-
-            if bgcolor == "#b34b4b":
-                nested = cell.find("table")
-                if nested is not None:
-                    event.squad_stats.append(_parse_group_stats_table(nested, side, current_squad))
-                continue
-
-            if bgcolor == "#9c9c9c":
-                nested = cell.find("table")
-                if nested is not None:
-                    event.side_stats.append(_parse_group_stats_table(nested, side, None))
-                    event.top_entries.extend(_parse_top_entries(nested, side))
-                continue
-
-            # plain log line
-            txt = _text(cell)
-            m = _LOG_LINE_RE.match(txt)
-            if m and current_pilot:
-                timestamp, desc = m.groups()
-                classified = _classify_log_line(desc)
-                key = (side, current_pilot)
-                pilot_seq[key] = pilot_seq.get(key, 0) + 1
-                event.log_entries.append(LogEntry(
-                    side=side, pilot=current_pilot, seq=pilot_seq[key], timestamp=timestamp,
-                    raw_text=desc, **classified,
-                ))
-
-    # A page with a frame title but no sides parsed isn't a successful
-    # read - it means the layout didn't match. Returning the empty event
-    # would let the caller store a frame_title and mark it fetched, so it
-    # would never be retried; 184 events were lost that way when side
-    # names outside Allies/Axis went unrecognised. Report it as a failure
-    # instead, so it stays in the retry set and shows up in the log.
     if not event.participants and not event.log_entries:
         return None
 
-    _disambiguate_squads(event)
+    derived_squads, derived_sides, derived_tops = _derive_stats(event)
+
+    # Squad figures are never posted by the new site, so they always come
+    # from the log - which is what the posted ones agreed with anyway.
+    event.squad_stats = derived_squads
+
+    counts = ("pilots", "kills", "assists", "obj_destroyed", "deaths", "landed",
+              "bailed", "captured", "crashed", "ditched", "discos")
+    if data.get("side_stats"):
+        event.side_stats = [
+            GroupStats(side=s["side"], squad=None, **{c: int(s.get(c) or 0) for c in counts})
+            for s in data["side_stats"]
+        ]
+    else:
+        event.side_stats = derived_sides
+
+    if data.get("top"):
+        event.top_entries = [
+            TopEntry(side=t["side"], category=t["category"], rank=int(t["rank"]), name=t["name"],
+                     squad=(t.get("squad") or None) if t["category"].startswith("pilot") else None,
+                     value=int(t["value"]))
+            for t in data["top"]
+        ]
+    else:
+        event.top_entries = derived_tops
+
     return event
 
 
-#: Neutral name for the same function, for callers scraping other types.
-parse_event = parse_fso_event
+#: How deep each top list goes on the site: seven pilots, three squads.
+_TOP_DEPTH = {"pilot_kills": 7, "pilot_obj": 7, "squad_kills": 3, "squad_obj": 3}
 
 
-def _disambiguate_squads(event: FSOEvent) -> None:
-    """Make (side, squad) unique across an event's squad stats.
+def _derive_stats(event: FSOEvent) -> tuple[list, list, list]:
+    """Squad totals, side totals and top lists, counted from the log.
 
-    squad_stats is keyed on (event_id, side, squad), so a repeated squad
-    within one side aborts the insert - and because the scrape saves as
-    it goes, one malformed page used to take the whole run down with it.
-    Suffixing keeps both blocks rather than dropping one or summing them
-    into a total the page never claimed."""
-    seen: dict[tuple[str, str], int] = {}
-    for stats in event.squad_stats:
-        key = (stats.side, stats.squad or "")
-        seen[key] = seen.get(key, 0) + 1
-        if seen[key] > 1:
-            stats.squad = f"{stats.squad} ({seen[key]})"
+    The rules are the ones the old site's posted figures follow, worked
+    out by recounting the log of every two-sided frame from 2025-26 and
+    comparing column by column (630 squad rows):
+
+    * `deaths` is every death except a capture, which counts as
+      `captured` instead - 628 of 630 rows agree;
+    * `obj_destroyed` includes city targets, which classify as `other`;
+    * `discos` is "Vanished without a trace";
+    * `crashed` is always 0. The old site never filled it in, so neither
+      do we - a derived figure the posted ones never had would make new
+      frames look different from old ones.
+
+    Top lists keep only non-zero values. Every derived value matched the
+    posted lists; who comes first in a tie is the only difference, and
+    here ties go alphabetically.
+    """
+    squad_of = {(p.side, p.pilot): p.squad for p in event.participants}
+    groups: dict[tuple[str, str], GroupStats] = {}
+
+    def group(side: str, squad: str) -> GroupStats:
+        if (side, squad) not in groups:
+            groups[(side, squad)] = GroupStats(side=side, squad=squad)
+        return groups[(side, squad)]
+
+    for p in event.participants:
+        group(p.side, p.squad).pilots += 1
+
+    pilot_kills: dict = defaultdict(int)
+    pilot_obj: dict = defaultdict(int)
+
+    for e in event.log_entries:
+        squad = squad_of.get((e.side, e.pilot), "")
+        g = group(e.side, squad)
+        if e.action == "kill":
+            g.kills += 1
+            pilot_kills[(e.side, e.pilot, squad)] += 1
+        elif e.action == "assist":
+            g.assists += 1
+        elif e.action == "ground_kill" or (e.action == "other" and e.raw_text.startswith("Destroyed ")):
+            g.obj_destroyed += 1
+            pilot_obj[(e.side, e.pilot, squad)] += 1
+        elif e.action == "death":
+            if "captured" in (e.detail or ""):
+                g.captured += 1
+            else:
+                g.deaths += 1
+        elif e.action == "landed":
+            g.landed += 1
+        elif e.action == "bailed":
+            g.bailed += 1
+        elif e.action == "ditched":
+            g.ditched += 1
+        elif e.raw_text.startswith("Vanished without a trace"):
+            g.discos += 1
+
+    counts = ("pilots", "kills", "assists", "obj_destroyed", "deaths", "landed",
+              "bailed", "captured", "crashed", "ditched", "discos")
+    sides: dict[str, GroupStats] = {}
+    for g in groups.values():
+        total = sides.setdefault(g.side, GroupStats(side=g.side, squad=None))
+        for c in counts:
+            setattr(total, c, getattr(total, c) + getattr(g, c))
+
+    tops: list[TopEntry] = []
+    for side in sides:
+        boards = {
+            "pilot_kills": [(p, sq, v) for (s, p, sq), v in pilot_kills.items() if s == side],
+            "pilot_obj": [(p, sq, v) for (s, p, sq), v in pilot_obj.items() if s == side],
+            "squad_kills": [(g.squad, None, g.kills) for g in groups.values()
+                            if g.side == side and g.squad],
+            "squad_obj": [(g.squad, None, g.obj_destroyed) for g in groups.values()
+                          if g.side == side and g.squad],
+        }
+        for category, rows in boards.items():
+            ranked = sorted((r for r in rows if r[2] > 0), key=lambda r: (-r[2], r[0].lower()))
+            for rank, (name, squad, value) in enumerate(ranked[:_TOP_DEPTH[category]], start=1):
+                tops.append(TopEntry(side, category, rank, name, squad, value))
+
+    return list(groups.values()), list(sides.values()), tops

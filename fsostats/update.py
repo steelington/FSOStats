@@ -1,19 +1,19 @@
 """Fetch newly-posted frames, for the in-app Update button.
 
-The scrape is already resumable, so an update is just the existing
-scrape run against the landing page: it diffs what the site lists
-against what's cached and fetches only what's new. Typically that is
-one event on a Friday, and nothing at all the rest of the week.
+An update asks the aceshigh.events API for the FSO events since
+`SCRAPE_SINCE`, diffs that against what's cached and fetches only
+what's new. Typically that is one frame on a Friday, and nothing at all
+the rest of the week.
 
 **FSODB is not thread-safe** - one sqlite connection, no locking. So the
 worker thread only fetches and parses, and hands finished events back
 through a queue for the caller to save on its own thread. That is the
 same split `scrape_fso.py` uses, and the reason it must not change.
 
-Everything on or before `SCRAPE_SINCE` is ignored. That skips the 73
-events ahevents.net cannot render - all 2008-2013, all of which would
-fail on every run - and keeps `upsert_event_listings` away from
-historical rows, whose curated titles it would otherwise overwrite.
+Everything on or before `SCRAPE_SINCE` is ignored. That keeps
+`upsert_event_listings` away from historical rows, whose curated titles
+it would otherwise overwrite, and keeps the request to the handful of
+frames an update can actually be missing.
 """
 from __future__ import annotations
 
@@ -24,10 +24,11 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 from fsostats.client import FSOClient
-from fsostats.parser import parse_fso_event, parse_fso_event_list
+from fsostats.parser import event_from_api, listings_from_api
 
-DEFAULT_WORKERS = 3
-DEFAULT_INTERVAL = 3.0
+# Two workers a second apart stay inside the server's 2 requests/second.
+DEFAULT_WORKERS = 2
+DEFAULT_INTERVAL = 1.0
 
 
 @dataclass
@@ -37,15 +38,28 @@ class Progress:
     text: str = ""
     fraction: float = 0.0
     event: object = None      # a parsed FSOEvent, for kind == "event"
+    listing: object = None    # its EventListing, for kind == "event"
     added: int = 0
     failed: int = 0
+
+
+def save(db, message: Progress) -> None:
+    """Store one finished event. Call it on the database's own thread.
+
+    The listing goes in first: `save_event` only UPDATEs the events row,
+    so a frame with no row yet - every new one - would save its log
+    under no event at all and never appear in the frame list.
+    """
+    db.upsert_event_listings([message.listing])
+    db.save_event(message.event)
 
 
 class Updater:
     """Runs the update on a background thread.
 
-    Poll `messages` from the UI thread; save any Progress carrying an
-    `event`, since only that thread may touch the database.
+    Poll `messages` from the UI thread and pass any Progress carrying an
+    `event` to `save()` there, since only that thread may touch the
+    database.
     """
 
     def __init__(self, since: str, known_event_ids=None,
@@ -75,15 +89,16 @@ class Updater:
         try:
             self.messages.put(Progress("status", "Fetching the event list..."))
             listing_client = FSOClient(min_interval=self.interval)
-            listings = parse_fso_event_list(listing_client.fetch_landing_page())
+            listings = listings_from_api(
+                listing_client.fetch_event_list("FSO", since=self.since))
 
+            # The server's `since` is inclusive; the cutoff day itself is
+            # already in the database.
             recent = [l for l in listings if (l.event_date or "")[:10] > self.since]
             todo = [l for l in recent if l.event_id not in self.known]
 
             self.messages.put(Progress(
-                "status",
-                f"{len(listings)} events listed, {len(recent)} after {self.since}, "
-                f"{len(todo)} new."))
+                "status", f"{len(recent)} frames since {self.since}, {len(todo)} new."))
 
             if not todo:
                 self.messages.put(Progress("done", "Already up to date."))
@@ -101,8 +116,7 @@ class Updater:
                     return listing, None, None
                 client = clients.get()
                 try:
-                    html = client.fetch_fso_event_log(listing.event_id)
-                    return listing, parse_fso_event(html, listing.event_id), None
+                    return listing, event_from_api(client.fetch_event(listing.event_id)), None
                 except Exception as error:            # noqa: BLE001 - reported below
                     return listing, None, error
                 finally:
@@ -125,13 +139,13 @@ class Updater:
                             fraction))
                         continue
                     if event is None:
-                        # A parse finding no sides returns None, so the
-                        # event stays retryable instead of being cached
-                        # as an empty frame.
+                        # A frame with no pilots and no lines comes back
+                        # None, so it stays retryable instead of being
+                        # cached as an empty frame.
                         failed += 1
                         self.messages.put(Progress(
                             "status",
-                            f"Event {listing.event_id}: no data / unexpected page.",
+                            f"Event {listing.event_id}: no pilots or log lines yet.",
                             fraction))
                         continue
                     added += 1
@@ -139,7 +153,7 @@ class Updater:
                         "event",
                         f"[{done}/{len(todo)}] {listing.title[:44]} - "
                         f"{len(event.log_entries)} log lines",
-                        fraction, event=event))
+                        fraction, event=event, listing=listing))
 
             self.messages.put(Progress(
                 "done", f"Added {added} frame(s), {failed} failed.", 1.0,

@@ -1,6 +1,6 @@
-"""One-shot / resumable scrape of event logs from ahevents.net into
-fsostats.db. Safe to re-run: already-fetched events are skipped, so this
-doubles as the "check for new events" monthly update job.
+"""One-shot / resumable fetch of event logs from the aceshigh.events API
+into fsostats.db. Safe to re-run: already-fetched events are skipped, so
+this doubles as the "check for new events" update job.
 
 Handles any of the site's eleven event types, one per run:
 
@@ -12,16 +12,16 @@ and a type whose listing page misbehaves cannot stall the others.
 Usage:
     python scrape_fso.py [--type TYPE] [--workers N] [--interval SECONDS]
 
-Most of the wall time is spent waiting on ahevents.net (roughly nine
-seconds a page, against a three second rate limit), so fetching in
-parallel is what actually speeds this up. Only the fetch+parse runs in
-threads; every database write happens on the main thread, since FSODB
-holds one sqlite connection and isn't safe to share.
+Only the fetch+parse runs in threads; every database write happens on
+the main thread, since FSODB holds one sqlite connection and isn't safe
+to share.
 
 Each worker carries its own client and so its own rate limiter, meaning
---workers N allows up to N requests per --interval. Keep N small: this
-is someone's community site, and the default of 3 is already gentle
-next to typical page response times.
+--workers N allows up to N requests per --interval. The server allows 2
+requests a second per address (burst 20) and answers anything faster
+with a 429, which the client waits out - so raising N past the default
+of 2 at 1s buys nothing. A full rebuild is ~660 frames, about ten
+minutes.
 """
 from __future__ import annotations
 
@@ -34,21 +34,16 @@ from concurrent.futures import ThreadPoolExecutor
 
 from fsostats.client import FSOClient
 from fsostats.db import FSODB
-from fsostats.parser import EVENT_TYPES, parse_event, parse_event_list
+from fsostats.parser import EVENT_TYPES, event_from_api, listings_from_api
 
-DEFAULT_WORKERS = 3
-DEFAULT_INTERVAL = 3.0
+DEFAULT_WORKERS = 2
+DEFAULT_INTERVAL = 1.0
 
 # Everything up to and including this date is already scraped, hand
 # checked and titled (fsostats/campaigns.py), and ships in the database.
-# Ignoring it entirely does two things:
-#
-#   * stops the update re-requesting the 73 events ahevents.net cannot
-#     render - they are all 2008-2013 and will never return, so every
-#     run was spending ~4 minutes to fail 73 times, and
-#   * keeps upsert_event_listings away from historical rows. It does
-#     `title=excluded.title` for every listing it is given, so any run
-#     covering old events would overwrite their curated titles.
+# Ignoring it keeps upsert_event_listings away from historical rows: it
+# does `title=excluded.title` for every listing it is given, so any run
+# covering old events would overwrite their curated titles.
 #
 # 24 Jul 2026 is August Storm Frame 3, the last frame of a complete
 # campaign. Move this forward only when the newest campaign is complete.
@@ -116,20 +111,21 @@ def main():
 
     print(f"Fetching {args.event_type} event list...", flush=True)
     listing_client = FSOClient(min_interval=args.interval)
-    listings = parse_event_list(listing_client.fetch_landing_page(), args.event_type)
-    print(f"Found {len(listings)} {args.event_type} events.", flush=True)
+    since = None if args.all else args.since
+    listings = listings_from_api(listing_client.fetch_event_list(args.event_type, since=since))
+    print(f"Found {len(listings)} {args.event_type} events"
+          f"{f' on or after {since}' if since else ''}.", flush=True)
 
     if not listings:
-        print(f"No <form name=\"{args.event_type}\"> dropdown on the landing page. "
-              f"Has the site changed?", flush=True)
         db.close()
         return
 
     if not args.all and args.since:
         # event_date is "YYYY-MM-DD HH:MM:SS", so a string compare against
         # a bare date is a plain date comparison.
+        # The server's `since` is inclusive; the cutoff day is already done.
         recent = [l for l in listings if (l.event_date or "")[:10] > args.since]
-        print(f"{len(listings) - len(recent)} on or before {args.since} ignored "
+        print(f"{len(listings) - len(recent)} on {args.since} ignored "
               f"(already scraped and titled); {len(recent)} in scope.", flush=True)
         listings = recent
 
@@ -144,8 +140,7 @@ def main():
         """Runs on a worker thread: fetch and parse only, no DB access."""
         client = clients.get()
         try:
-            html = client.fetch_event_log(listing.event_id, args.event_type)
-            return listing, parse_event(html, listing.event_id), None
+            return listing, event_from_api(client.fetch_event(listing.event_id)), None
         except Exception as e:
             return listing, None, e
         finally:
@@ -182,9 +177,9 @@ def main():
                 if event is None:
                     failed += 1
                     problems.append((args.event_type, listing.event_id, listing.event_date,
-                                     listing.title, "no data: site returned an unparseable page"))
+                                     listing.title, "no data: no pilots or log lines"))
                     print(f"[{done}/{len(to_fetch)}] event {listing.event_id} ({listing.event_date}): "
-                          f"no data / unexpected page, skipping", flush=True)
+                          f"no pilots or log lines, skipping", flush=True)
                     continue
 
                 # Completeness, not just success. 31 events in the existing

@@ -17,7 +17,7 @@ import webbrowser
 import customtkinter as ctk
 
 from fsostats import (__version__, headtohead, leaderboard, pilot, settings, squads,
-                      theme, tooltip, version_check)
+                      theme, tooltip, update, version_check)
 from fsostats.chart import TrendChart
 from fsostats.db import FSODB
 from fsostats.grid import GridView
@@ -234,8 +234,8 @@ class App(ctk.CTk):
         tooltip.attach(self.update_btn, (
             "Fetch frames posted since the database was built.\n\nDiffs the "
             "site's event list and fetches only what's new - usually one "
-            "frame, on a Friday. Runs in the background at three requests "
-            "every three seconds; ahevents.net is a small community site."))
+            "frame, on a Friday. Runs in the background, reading the "
+            "aceshigh.events log API over a verified connection."))
         tooltip.attach(self.stop_btn,
                        "Stop after the fetch in flight. Frames already saved are kept.")
 
@@ -1138,7 +1138,7 @@ class App(ctk.CTk):
         self.stop_btn.configure(state="normal")
         self.progress.pack(side="right", padx=10, pady=4)
         self.progress.set(0)
-        self.status.configure(text="Contacting ahevents.net...")
+        self.status.configure(text="Contacting aceshigh.events...")
         self._updater.start()
         self._poll_update()
 
@@ -1162,7 +1162,7 @@ class App(ctk.CTk):
 
             if message.kind == "event":
                 try:
-                    self.db.save_event(message.event)
+                    update.save(self.db, message)
                     self._update_added += 1
                 except Exception as error:   # noqa: BLE001 - one bad frame must not stop the run
                     self.status.configure(
@@ -1268,7 +1268,7 @@ class App(ctk.CTk):
         self.frame_totals.configure(text="")
         self.status.configure(
             text=f"No frames in {self.db.path.name}. Run  python scrape_fso.py --all  "
-                 f"to fetch them (30-60 minutes), or use the packaged exe, "
+                 f"to fetch them (about ten minutes), or use the packaged exe, "
                  f"which ships with the database included.")
         if getattr(self, "_empty_notice", None) is not None:
             return
@@ -1276,10 +1276,10 @@ class App(ctk.CTk):
             self.tabs.tab("Frames"),
             text=("This database is empty.\n\n"
                   "The scraped data isn't kept in the repository, so a fresh\n"
-                  "checkout has to fetch it from ahevents.net:\n\n"
+                  "checkout has to fetch it from aceshigh.events:\n\n"
                   "    python scrape_fso.py --all\n\n"
-                  "That takes roughly half an hour to an hour - the site is small\n"
-                  "and the client deliberately goes easy on it. The scrape is\n"
+                  "That takes about ten minutes - the site is small and the\n"
+                  "client deliberately goes easy on it. The fetch is\n"
                   "resumable, so stopping and restarting is fine.\n\n"
                   "If you just want to use FSO Stats, the packaged exe ships\n"
                   "with every frame already in it."),

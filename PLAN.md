@@ -151,3 +151,117 @@ the app - median pilots per frame went 471 in 2009 to 66 in 2025, though
 **Open data questions:** 4 kill rows still name a victim who isn't a
 participant of a two-sided frame; `sides.py` has an untested idea about
 weighting affinity non-linearly.
+
+## Next: v0.2.1 - fix Update, move to aceshigh.events (18 Oct 2026)
+
+A user reported Update "doing nothing": the top frame stayed 24 Jul 2026.
+
+**The Update bug - fixed in the working tree, not yet committed.**
+`save_event()` only UPDATEs the `events` row; `upsert_event_listings()`
+is what creates it, and `scrape_fso.py` calls it but the in-app Updater
+never did. So every new frame saved its logs under no event row, never
+reached the frame list, and the status bar still said "Added 9
+frame(s)". Fix: `update.save()` upserts the listing first, and gui.py
+saves through it. Pinned by `tests/test_update.py`, which fails without
+the fix; 164 tests pass. Users' databases self-heal - the orphaned
+frames never got `frame_title`, so the next Update re-fetches them and
+`save_event` clears the orphan rows.
+
+**Why switch sources now.** ahevents.net had a backdoor, and the client
+talks to it with TLS verification off - every Update has every user's
+app parse pages from a compromised host over an interceptable
+connection. aceshigh.events (the rebuild, E:\AHEVENTS\AHEvents_Joomla)
+is current, has valid TLS, and answers in ~1.5s against ~9s. Speed is a
+side benefit only: the exe ships the database, so Update pulls a handful
+of frames at most. The case for a JSON API is accuracy, not speed - see
+step 1.
+
+**What was checked on the live site:**
+- FSO list `https://aceshigh.events/logs/events/FSO`, 100 per page,
+  `?page=N` for older. 665 FSO events (old site lists 669 - unexplained).
+- Event page `https://aceshigh.events/logs/event/{id}`, cached a day
+  with an ETag. Markup: `section.log-side` > `h3.log-side-name`, then
+  `div.squad-bar`, `div.pilot-bar`, `div.log-line` with `span.log-t`;
+  also `stat-grid`, `side-summary`, `top-list`. Log text is the same
+  wording, so `parser._LOG_PATTERNS` should carry over.
+- Old frames keep their IDs and data: 4295 has the same 1,120 log lines
+  and 66 pilots on both sites.
+- Frames uploaded on the new site get **900xxx IDs** (900001-900011;
+  900008/900010 not in the FSO list). Nothing after 4295 exists under an
+  old-site ID, so if 0.2.1's bundled database takes the nine new frames
+  from aceshigh.events there is nothing to de-duplicate. Never store
+  4298-4319 from ahevents.net, or those frames exist twice.
+- Neither the list nor the event page gives a time - only a date
+  ("17 Oct 2026", "Saturday 17 October 2026"). There is no submitter.
+
+**Bug on aceshigh.events: new frames are dated in UTC.**
+`logs/src/Application.php:822` formats the HTC frame id's unix timestamp
+with `date()`, which uses the droplet's zone (UTC). HTC and the legacy
+data are US Central: `SNO 1784941194` is 19:59:54 to HTC and 00:59:54
+UTC. So every Friday frame since the switch reads as Saturday. Fix:
+format in `America/Chicago`, and correct the dates of the 900xxx rows
+already stored (check each - a CM-typed or log-derived date may not need
+shifting). Needs a deploy and a data fix on the droplet: one ssh session,
+and ask first.
+
+**Steps**
+1. AHEvents: a read-only JSON API in the log app, plus the Chicago
+   timezone fix, in one deploy. The HTML pages drop the time and the
+   submitter; the API can return the full `event_date` and everything
+   else straight from the tables, and FSOSTATS needs no HTML parser for
+   the new site. Sketch:
+   - `GET /logs/api/events/{TYPE}` - every visible event of a type:
+     `source_id`, `title`, `event_date` (full, Central), `submitter`,
+     `event_type`. Unpaged, or `?since=YYYY-MM-DD` - Update only wants
+     what's newer than the bundled db.
+   - `GET /logs/api/event/{id}` - one frame: participants (side, squad,
+     pilot), log entries (side, pilot, seq, log_time, raw_text, plus the
+     parsed action/data1/data2), side and squad stats, top lists.
+   - Built on `EventRepository` - `buildSides()` and its neighbours
+     already load all of this. Same visibility rules as the pages (no
+     hidden or sandbox events), the same day-long cache and ETag as
+     `showEvent()`, `Content-Type: application/json`. Matched in the
+     router before `/events/` and `/event/`.
+   - Decide whether FSOSTATS maps the API's parsed actions or keeps
+     running `raw_text` through `parser._LOG_PATTERNS`. Raw text is the
+     safer start - it guarantees new rows match the 590k already cached.
+   Deploy, then correct the stored dates of the 900xxx rows. Both need a
+   go-ahead; the droplet work is one ssh session.
+
+   **Live since 18 Oct 2026** (AHEvents 5abcd84: `Application.php`,
+   `EventRepository.php`, `deploy/aceshigh-events.conf`). Verified on
+   the droplet: 4295 returns 66 participants and 1,120 lines, matching
+   the old site. The nine FSO 900xxx dates are shifted UTC -> Central and
+   all read Friday ~20:xx now (backup `~/datefix-20261018T063500Z.json`).
+   Left alone: Scenario 900008/900010/900012 at 23:27 - probably UTC too
+   (18:27 Central, same day), unconfirmed. The `limit_req` block is in
+   the live nginx file too (backup `~/ahevents.nginx.bak-20261018`);
+   a 30-request burst gave 24 x 200 then 429s, as designed. Exactly the sketch above. Envelope
+   carries `api: 1` and `timezone: America/Chicago`; each log line has
+   `side, side_slot, pilot, seq, time, action, data1, data2, text`, where
+   `text` is the page's sentence (composed by `EventFormatter` for 900xxx
+   rows, which store no prose). No API key, by decision: the data is
+   public and a key inside the exe is not a secret. nginx instead gets a
+   `limit_req` zone on `/logs/api/` (2r/s, burst 20, 429) - the live
+   site file was rewritten by certbot, so that block is added to it by
+   hand, not copied over. Smoke-tested under `php -S` with a stub
+   database (routing, JSON, ETag/304, 400/404s, the HTML page after the
+   `buildSides` refactor); the real SQL is only exercised once deployed.
+   Send `User-Agent: FSOStats/<version>` from the client.
+2. FSOSTATS: a client for the API returning the same
+   `EventListing`/`FSOEvent`, TLS verification on; drop the expired-cert
+   exception; update tests, status text ("Contacting ahevents.net..."),
+   README and docstrings. Re-fetch the nine frames into the dev db from
+   the API, then `apply_campaign_metadata()`/`apply_side_roles()`.
+
+   **Done 18 Oct 2026, uncommitted.** `client.py` reads the API;
+   `parser.py` lost its HTML walking (bs4/lxml dropped from requirements
+   and excluded in the spec) and gained `listings_from_api`,
+   `event_from_api` and `_derive_stats`. Two sentence patterns widened
+   for the new site's wording - uncredited deaths ("Was shot down.",
+   "Crashed.") and "Destroyed an ...". Legacy frames 4295/4219/4140/3500
+   fetched through the API are identical to their scraped copies. Dev db
+   now has the nine new frames: 592 frames, 204 campaigns, roles right.
+   179 tests (`tests/test_api.py` new).
+3. Commit, bump `__version__` to 0.2.1, `prepare_db`, build, release.
+   The in-app badge then moves 0.2.0 users off the old site.

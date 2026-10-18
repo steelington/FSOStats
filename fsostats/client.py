@@ -1,11 +1,19 @@
-"""Rate-limited HTTP client for ahevents.net's event-logs page.
+"""Rate-limited HTTP client for the aceshigh.events log API.
 
-ahevents.net's TLS certificate expired (Dec 30 2025) and hasn't been
-renewed - every visitor sees a browser warning right now. There's no
-missing-intermediate trick to fix this like on hitechcreations.com (the
-leaf cert itself is past its validity window), so we disable
-verification for this host specifically. Acknowledged risk, accepted
-for read-only public event-log data with the site owner's knowledge.
+aceshigh.events is the rebuilt Aces High events site, and its log
+application serves the whole archive as JSON:
+
+    /logs/api/events/{TYPE}[?since=YYYY-MM-DD]   every visible event of a type
+    /logs/api/event/{ID}                         one frame, log lines and all
+
+This replaced scraping ahevents.net, whose certificate expired in Dec
+2025 and which turned out to carry a backdoor - every Update had every
+user's app parsing pages from a compromised host with TLS checks off.
+Verification is on here, as it should be.
+
+The server limits /logs/api/ to 2 requests a second per address, with a
+burst of 20. The client paces itself inside that, and if it ever gets a
+429 anyway it backs off and tries again rather than failing the frame.
 """
 from __future__ import annotations
 
@@ -13,35 +21,35 @@ import threading
 import time
 
 import requests
-import urllib3
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+from fsostats import __version__
 
-EVENT_LOGS_URL = "https://ahevents.net/index.php/event-logs"
+API_BASE = "https://aceshigh.events/logs/api"
 
+# Says who we are rather than posing as a browser: the site owner can see
+# this app's traffic in the logs, and tell versions apart if one misbehaves.
 DEFAULT_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Origin": "https://ahevents.net",
-    "Referer": EVENT_LOGS_URL,
+    "User-Agent": f"FSOStats/{__version__} (+https://github.com/steelington/FSOStats)",
+    "Accept": "application/json",
 }
 
-DEFAULT_MIN_INTERVAL = 3.0
+DEFAULT_MIN_INTERVAL = 1.0
+
+# Attempts after a 429, waiting 2s, 4s, 6s. The bucket refills at 2/s, so
+# the first wait alone is normally enough.
+_RETRIES = 3
 
 
 class FSOClient:
-    """Thread-safe, rate-limited client for ahevents.net."""
+    """Thread-safe, rate-limited client for the aceshigh.events API."""
 
-    def __init__(self, min_interval: float = DEFAULT_MIN_INTERVAL, timeout: float = 60.0):
+    def __init__(self, min_interval: float = DEFAULT_MIN_INTERVAL, timeout: float = 30.0,
+                 base_url: str = API_BASE):
         self.min_interval = min_interval
         self.timeout = timeout
+        self.base_url = base_url.rstrip("/")
         self._session = requests.Session()
         self._session.headers.update(DEFAULT_HEADERS)
-        self._session.verify = False
         self._lock = threading.Lock()
         self._last_request_time = 0.0
 
@@ -53,27 +61,31 @@ class FSOClient:
                 time.sleep(wait)
             self._last_request_time = time.monotonic()
 
-    def fetch_landing_page(self) -> str:
-        self._throttle()
-        resp = self._session.get(EVENT_LOGS_URL, timeout=self.timeout)
-        resp.raise_for_status()
-        return resp.text
+    def _get(self, path: str, params: dict | None = None) -> dict:
+        for attempt in range(_RETRIES + 1):
+            self._throttle()
+            resp = self._session.get(self.base_url + path, params=params, timeout=self.timeout)
+            if resp.status_code == 429 and attempt < _RETRIES:
+                time.sleep(2.0 * (attempt + 1))
+                continue
+            resp.raise_for_status()
+            return resp.json()
+        raise AssertionError("unreachable")   # the last attempt returns or raises
 
-    def fetch_event_log(self, event_id: int, event_type: str = "FSO") -> str:
-        """Fetch one event's log page.
+    def fetch_event_list(self, event_type: str = "FSO", since: str | None = None) -> dict:
+        """Every visible event of one type, newest first.
 
-        The landing page carries eleven near-identical forms, one per event
-        type, all posting to this same URL with the same `event_id` field
-        and differing only in the submit button's value - `Get FSO Logs`,
-        `Get Snapshot Logs`, and so on. So one endpoint serves every type
-        and `event_id` is a single id space across all of them.
+        `since` (YYYY-MM-DD) keeps only events on or after that day - the
+        server compares inclusively, so a caller wanting "after" filters
+        the boundary day itself.
         """
-        self._throttle()
-        data = {"event_id": str(event_id), "action": f"Get {event_type} Logs"}
-        resp = self._session.post(EVENT_LOGS_URL, data=data, timeout=self.timeout)
-        resp.raise_for_status()
-        return resp.text
+        params = {"since": since} if since else None
+        return self._get(f"/events/{event_type}", params)
 
-    def fetch_fso_event_log(self, event_id: int) -> str:
-        """Back-compatible alias; the GUI's updater calls this."""
-        return self.fetch_event_log(event_id, "FSO")
+    def fetch_event(self, event_id: int) -> dict:
+        """One frame: the event, participants, every log line, and the side
+        totals and top lists where the site has them.
+
+        Event ids are one space across every type, so no type is needed.
+        """
+        return self._get(f"/event/{int(event_id)}")

@@ -3,9 +3,9 @@
 Browse **Aces High Friday Squad Operations** statistics — 18 years of
 them, from 2009 to today.
 
-FSO logs live on [ahevents.net](http://ahevents.net) one frame at a
-time. This scrapes them into a local SQLite database and puts a desktop
-app on top, so a pilot's career, a squad's history, or a personal
+FSO logs live on [aceshigh.events](https://aceshigh.events) one frame
+at a time. This pulls them into a local SQLite database and puts a
+desktop app on top, so a pilot's career, a squad's history, or a personal
 record against one opponent is a couple of clicks rather than an
 afternoon of reading log pages.
 
@@ -68,20 +68,18 @@ why.
 
 ## Running from source
 
-> **The database is not in this repository**, and there is no quick way
-> to get one. A fresh clone starts with nothing and has to scrape all
-> ~660 event pages from ahevents.net. The client waits 3 seconds
-> between requests per worker and runs 3 workers, and the site itself
-> takes about nine seconds to answer, so **expect somewhere between
-> half an hour and an hour** before you can use the app. It is a small
-> community site; please don't speed it up.
+> **The database is not in this repository.** A fresh clone starts with
+> nothing and has to fetch all ~660 frames from the aceshigh.events log
+> API. The client stays inside the site's limit of two requests a
+> second, so **expect about ten minutes** before you can use the app.
+> It is a small community site; please don't speed it up.
 >
 > If you only want to *use* FSO Stats, download the exe instead. Source
 > is for hacking on it.
 
 ```
 pip install -r requirements.txt
-python scrape_fso.py --all        # ~30-60 minutes, once
+python scrape_fso.py --all        # ~10 minutes, once
 python app.py
 ```
 
@@ -143,6 +141,6 @@ integration checks asserting invariants on the real one.
 
 ## Licence and courtesy
 
-The scraper waits three seconds between requests and runs three workers.
-ahevents.net is a small community site run by volunteers — please don't
-raise those numbers.
+The client makes at most two requests a second, which is the limit
+aceshigh.events sets for its log API. It is a small community site run
+by volunteers — please don't raise that.

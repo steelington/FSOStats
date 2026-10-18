@@ -1,7 +1,7 @@
 """Ask GitHub whether a newer release of FSO Stats has been published.
 
 This is the *application* version check. `fsostats.update` is the
-unrelated thing that fetches newly-posted frames from ahevents.net -
+unrelated thing that fetches newly-posted frames from aceshigh.events -
 different job, different server, and the two must not be confused.
 
 What this sends: one anonymous HTTPS GET to the public GitHub releases
